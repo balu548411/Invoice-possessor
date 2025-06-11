@@ -16,23 +16,23 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Data configuration
-IMAGE_SIZE = (1024, 1024)  # Input size for the model (height, width)
-TRAIN_VAL_SPLIT = 0.8  # 80% training, 20% validation
-BATCH_SIZE = 8
+IMAGE_SIZE = (1280, 1280)  # Increased resolution for better detail capture
+TRAIN_VAL_SPLIT = 0.85  # Increased training percentage
+BATCH_SIZE = 4  # Reduced to accommodate larger model
 NUM_WORKERS = 4
 
 # Model configuration
 MODEL_CONFIG = {
-    "backbone": "resnet50",  # Visual backbone ["resnet50", "efficientnet_b3", "swin_tiny"]
-    "hidden_dim": 256,
-    "encoder_layers": 6,
-    "encoder_heads": 8,
-    "decoder_layers": 6,
-    "decoder_heads": 8,
-    "dim_feedforward": 2048,
-    "dropout": 0.1,
-    "activation": "relu",
-    "num_queries": 100,  # Max number of entities to extract
+    "backbone": "swin_base_patch4_window7_224",  # Upgraded to Swin Transformer base model
+    "hidden_dim": 384,  # Increased hidden dimension
+    "encoder_layers": 8,  # More encoder layers
+    "encoder_heads": 12,  # More attention heads
+    "decoder_layers": 8,  # More decoder layers
+    "decoder_heads": 12,  # More attention heads
+    "dim_feedforward": 3072,  # Larger feedforward dimension
+    "dropout": 0.2,  # Increased dropout for regularization
+    "activation": "gelu",  # GELU activation (better than ReLU)
+    "num_queries": 150,  # More queries to handle complex documents
     "entity_classes": {
         "InvoiceId": 0,
         "InvoiceDate": 1,
@@ -52,13 +52,16 @@ MODEL_CONFIG = {
 
 # Training configuration
 TRAIN_CONFIG = {
-    "epochs": 100,
-    "lr": 1e-4,
-    "lr_backbone": 1e-5,
+    "epochs": 150,  # More training epochs
+    "lr": 2e-4,  # Slightly higher base learning rate
+    "lr_backbone": 2e-5,  # Slightly higher backbone learning rate
     "weight_decay": 1e-4,
-    "lr_drop": 50,
+    "warmup_epochs": 5,  # Learning rate warmup
+    "lr_scheduler": "cosine",  # Cosine annealing scheduler
+    "min_lr": 1e-6,  # Minimum learning rate for cosine scheduler
     "clip_max_norm": 0.1,
-    "early_stopping_patience": 10,
+    "early_stopping_patience": 15,  # More patience for early stopping
+    "mixed_precision": True,  # Enable mixed precision training
 }
 
 # Augmentation configuration
@@ -68,6 +71,11 @@ AUG_CONFIG = {
     "shift_limit": 0.1,
     "brightness_contrast_limit": 0.2,
     "gaussian_noise_limit": 25.0,
+    "blur_limit": 3,
+    "grid_distortion_prob": 0.2,  # Add controlled distortion
+    "random_shadow_prob": 0.2,  # Simulate shadows
+    "cutout_prob": 0.1,  # Cutout augmentation
+    "elastic_transform_prob": 0.2,  # Elastic transform for realistic document deformation
 }
 
 # Inference configuration
@@ -79,6 +87,6 @@ INFERENCE_CONFIG = {
 # Logging configuration
 LOGGING_CONFIG = {
     "use_wandb": False,
-    "wandb_project": "document-parsing",
-    "log_interval": 100,
+    "wandb_project": "document-parsing-enhanced",
+    "log_interval": 50,  # More frequent logging
 } 

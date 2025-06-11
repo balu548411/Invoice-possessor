@@ -2,97 +2,129 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
-from typing import Optional
+from typing import Optional, List
 
 
 class Transformer(nn.Module):
     """
-    Transformer encoder-decoder architecture for document understanding.
+    Enhanced Transformer for document parsing with stochastic depth.
+    
+    Args:
+        d_model: Feature dimension
+        nhead: Number of attention heads
+        num_encoder_layers: Number of encoder layers
+        num_decoder_layers: Number of decoder layers
+        dim_feedforward: Hidden dimension of FFN
+        dropout: Dropout probability
+        activation: Activation function
+        stochastic_depth_prob: Stochastic depth probability
     """
     def __init__(
-        self, 
-        d_model=256, 
-        nhead=8, 
-        num_encoder_layers=6, 
-        num_decoder_layers=6, 
-        dim_feedforward=2048, 
-        dropout=0.1, 
+        self,
+        d_model=512,
+        nhead=8,
+        num_encoder_layers=6,
+        num_decoder_layers=6,
+        dim_feedforward=2048,
+        dropout=0.1,
         activation="relu",
-        normalize_before=False
+        stochastic_depth_prob=0.0,
     ):
         super().__init__()
 
-        # Encoder
+        # Build encoder
         encoder_layer = TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation, normalize_before
+            d_model, nhead, dim_feedforward, dropout, activation
         )
-        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+        encoder_norm = nn.LayerNorm(d_model)
+        self.encoder = TransformerEncoder(
+            encoder_layer, num_encoder_layers, encoder_norm, stochastic_depth_prob
+        )
 
-        # Decoder
+        # Build decoder
         decoder_layer = TransformerDecoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation, normalize_before
+            d_model, nhead, dim_feedforward, dropout, activation
         )
         decoder_norm = nn.LayerNorm(d_model)
-        self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm)
-
-        # Initialize parameters
-        self._reset_parameters()
+        self.decoder = TransformerDecoder(
+            decoder_layer, num_decoder_layers, decoder_norm, stochastic_depth_prob
+        )
 
         self.d_model = d_model
         self.nhead = nhead
+        
+        # Initialize parameters
+        self._reset_parameters()
 
     def _reset_parameters(self):
-        """Initialize parameters with Xavier uniform."""
+        """Initialize parameters."""
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
     def forward(self, src, mask, query_embed, pos_embed):
         """
-        Forward pass of transformer.
+        Forward pass for the transformer.
         
         Args:
-            src: Image features [batch_size, seq_len, d_model]
-            mask: Padding mask [batch_size, seq_len]
-            query_embed: Query embeddings for decoder [num_queries, d_model]
-            pos_embed: Position embeddings [batch_size, seq_len, d_model]
+            src: Image features [batch_size, channels, height, width]
+            mask: Attention mask [batch_size, height, width]
+            query_embed: Object query embeddings [num_queries, d_model]
+            pos_embed: Position embeddings [batch_size, channels, height, width]
             
         Returns:
-            Decoder output and encoder memory
+            decoder_output: Decoder output [num_layers, batch_size, num_queries, d_model]
+            encoder_output: Encoder output [batch_size, height*width, d_model]
         """
-        # Flatten batch and spatial dimensions
+        # Flatten feature map
         bs, c, h, w = src.shape
-        src = src.flatten(2).permute(2, 0, 1)  # [h*w, batch_size, c]
-        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)  # [h*w, batch_size, c]
-        mask = mask.flatten(1)  # [batch_size, h*w]
+        src = src.flatten(2).permute(2, 0, 1)  # [h*w, batch_size, channels]
+        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)  # [h*w, batch_size, channels]
+        mask = mask.flatten(1) if mask is not None else None  # [batch_size, h*w]
         
-        # Repeat query embeddings for each item in batch
+        # Process query embeddings
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)  # [num_queries, batch_size, d_model]
         
-        # Create target for decoder initialization (zeros)
-        tgt = torch.zeros_like(query_embed)  # [num_queries, batch_size, d_model]
-
-        # Run transformer encoder-decoder
+        # Initialize target with zeros
+        target = torch.zeros_like(query_embed)
+        
+        # Run transformer encoder
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
-        hs = self.decoder(tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed)
-
-        # Reshape output: [num_decoder_layers, num_queries, batch_size, d_model] -> [batch_size, num_queries, d_model]
-        hs = hs.transpose(1, 2)
-        memory = memory.permute(1, 2, 0).view(bs, c, h, w)
+        
+        # Run transformer decoder
+        hs = self.decoder(target, memory, memory_key_padding_mask=mask,
+                          pos=pos_embed, query_pos=query_embed)
+        
+        # Reshape outputs
+        memory = memory.permute(1, 0, 2)  # [batch_size, h*w, channels]
+        hs = hs.permute(0, 2, 1, 3)  # [num_layers, batch_size, num_queries, channels]
         
         return hs, memory
 
 
 class TransformerEncoder(nn.Module):
-    """Transformer Encoder with stacked encoder layers."""
+    """
+    TransformerEncoder with stochastic depth.
     
-    def __init__(self, encoder_layer, num_layers, norm=None):
+    Args:
+        encoder_layer: Single encoder layer
+        num_layers: Number of layers
+        norm: Normalization layer
+        stochastic_depth_prob: Probability of dropping a layer
+    """
+    def __init__(self, encoder_layer, num_layers, norm=None, stochastic_depth_prob=0.0):
         super().__init__()
-        # Clone the encoder layer num_layers times
         self.layers = _get_clones(encoder_layer, num_layers)
         self.num_layers = num_layers
         self.norm = norm
+        
+        # Set up stochastic depth
+        self.stochastic_depth_prob = stochastic_depth_prob
+        if stochastic_depth_prob > 0:
+            # Linear decay of drop probability from 0 to stochastic_depth_prob
+            self.drop_probs = [i / (num_layers - 1) * stochastic_depth_prob for i in range(num_layers)]
+        else:
+            self.drop_probs = [0.0] * num_layers
 
     def forward(
         self,
@@ -102,19 +134,24 @@ class TransformerEncoder(nn.Module):
         pos: Optional[torch.Tensor] = None,
     ):
         """
-        Pass the input through all encoder layers in sequence.
+        Forward pass through encoder.
         
         Args:
-            src: Input features [seq_len, batch_size, embed_dim]
+            src: Input features
             mask: Attention mask
-            src_key_padding_mask: Key padding mask
-            pos: Position encoding
+            src_key_padding_mask: Source padding mask
+            pos: Position embeddings
         """
         output = src
-
-        for layer in self.layers:
+        
+        # Process each layer
+        for idx, layer in enumerate(self.layers):
+            # Apply stochastic depth during training
+            if self.training and self.drop_probs[idx] > 0 and torch.rand(1).item() < self.drop_probs[idx]:
+                continue
+                
             output = layer(output, src_mask=mask,
-                           src_key_padding_mask=src_key_padding_mask, pos=pos)
+                          src_key_padding_mask=src_key_padding_mask, pos=pos)
 
         if self.norm is not None:
             output = self.norm(output)
@@ -123,14 +160,32 @@ class TransformerEncoder(nn.Module):
 
 
 class TransformerDecoder(nn.Module):
-    """Transformer Decoder with stacked decoder layers."""
+    """
+    TransformerDecoder with stochastic depth.
     
-    def __init__(self, decoder_layer, num_layers, norm=None):
+    Args:
+        decoder_layer: Single decoder layer
+        num_layers: Number of layers
+        norm: Normalization layer
+        stochastic_depth_prob: Probability of dropping a layer
+    """
+    def __init__(self, decoder_layer, num_layers, norm=None, stochastic_depth_prob=0.0):
         super().__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
         self.norm = norm
         
+        # Set up stochastic depth
+        self.stochastic_depth_prob = stochastic_depth_prob
+        if stochastic_depth_prob > 0:
+            # Linear decay of drop probability from 0 to stochastic_depth_prob
+            self.drop_probs = [i / (num_layers - 1) * stochastic_depth_prob for i in range(num_layers)]
+        else:
+            self.drop_probs = [0.0] * num_layers
+        
+        # Track outputs of each layer for auxiliary losses
+        self.return_intermediate = True
+
     def forward(
         self,
         tgt,
@@ -143,76 +198,83 @@ class TransformerDecoder(nn.Module):
         query_pos: Optional[torch.Tensor] = None,
     ):
         """
-        Pass the inputs through all decoder layers in sequence.
+        Forward pass through decoder.
         
         Args:
-            tgt: Target sequences [seq_len, batch_size, embed_dim]
-            memory: Output from encoder [seq_len, batch_size, embed_dim]
+            tgt: Target embeddings
+            memory: Memory from encoder
             tgt_mask: Target attention mask
             memory_mask: Memory attention mask
-            tgt_key_padding_mask: Target key padding mask
-            memory_key_padding_mask: Memory key padding mask
-            pos: Position encoding for memory
-            query_pos: Position encoding for queries
+            tgt_key_padding_mask: Target padding mask
+            memory_key_padding_mask: Memory padding mask
+            pos: Position embeddings
+            query_pos: Query position embeddings
         """
         output = tgt
 
         intermediate = []
 
-        for layer in self.layers:
-            output = layer(output, memory, tgt_mask=tgt_mask,
-                           memory_mask=memory_mask,
-                           tgt_key_padding_mask=tgt_key_padding_mask,
-                           memory_key_padding_mask=memory_key_padding_mask,
-                           pos=pos, query_pos=query_pos)
-            if self.norm is not None:
-                intermediate.append(self.norm(output))
-            else:
+        for idx, layer in enumerate(self.layers):
+            # Apply stochastic depth during training
+            if self.training and self.drop_probs[idx] > 0 and torch.rand(1).item() < self.drop_probs[idx]:
+                intermediate.append(output)
+                continue
+                
+            output = layer(
+                output,
+                memory,
+                tgt_mask=tgt_mask,
+                memory_mask=memory_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=memory_key_padding_mask,
+                pos=pos,
+                query_pos=query_pos,
+            )
+            
+            if self.return_intermediate:
                 intermediate.append(output)
 
         if self.norm is not None:
             output = self.norm(output)
-            intermediate.pop()
-            intermediate.append(output)
+            if self.return_intermediate:
+                intermediate.pop()
+                intermediate.append(output)
 
-        # Return tensor of shape [num_layers, seq_len, batch_size, embed_dim]
-        # where each layer is the output of the corresponding decoder layer
-        return torch.stack(intermediate)
+        if self.return_intermediate:
+            return torch.stack(intermediate)
+
+        return output.unsqueeze(0)
 
 
 class TransformerEncoderLayer(nn.Module):
-    """Single Transformer Encoder Layer with self-attention."""
-    
-    def __init__(
-        self,
-        d_model,
-        nhead,
-        dim_feedforward=2048,
-        dropout=0.1,
-        activation="relu",
-        normalize_before=False,
-    ):
+    """
+    Enhanced transformer encoder layer with pre-norm architecture.
+    """
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu"):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        # Self-attention
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=False)
         
-        # Implementation of Feedforward model
+        # Feed-forward network
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
+        # Layer normalization
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
+        
+        # Dropout
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
+        # Activation
         self.activation = _get_activation_fn(activation)
-        self.normalize_before = normalize_before
-
+        
     def with_pos_embed(self, tensor, pos: Optional[torch.Tensor]):
-        """Add position embeddings if provided."""
         return tensor if pos is None else tensor + pos
 
-    def forward_post(
+    def forward(
         self,
         src,
         src_mask: Optional[torch.Tensor] = None,
@@ -220,83 +282,67 @@ class TransformerEncoderLayer(nn.Module):
         pos: Optional[torch.Tensor] = None,
     ):
         """
-        Encoder layer with post-normalization.
-        Apply self-attention first, then feed-forward network.
+        Forward pass for encoder layer.
         """
-        q = k = self.with_pos_embed(src, pos)
-        src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
-                              key_padding_mask=src_key_padding_mask)[0]
-        src = src + self.dropout1(src2)
-        src = self.norm1(src)
-        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-        src = src + self.dropout2(src2)
-        src = self.norm2(src)
-        return src
-
-    def forward_pre(
-        self,
-        src,
-        src_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-        pos: Optional[torch.Tensor] = None,
-    ):
-        """
-        Encoder layer with pre-normalization.
-        Apply normalization first, then self-attention.
-        """
+        # Pre-norm architecture
         src2 = self.norm1(src)
+        
+        # Add position embeddings to queries and keys
         q = k = self.with_pos_embed(src2, pos)
-        src2 = self.self_attn(q, k, value=src2, attn_mask=src_mask,
-                              key_padding_mask=src_key_padding_mask)[0]
+        
+        # Self-attention
+        src2, _ = self.self_attn(q, k, value=src2, attn_mask=src_mask,
+                                key_padding_mask=src_key_padding_mask)
+        
+        # Residual connection and dropout
         src = src + self.dropout1(src2)
+        
+        # Pre-norm for FFN
         src2 = self.norm2(src)
+        
+        # Feed-forward network
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+        
+        # Residual connection and dropout
         src = src + self.dropout2(src2)
+        
         return src
-
-    def forward(self, *args, **kwargs):
-        """Run either pre-norm or post-norm version based on configuration."""
-        if self.normalize_before:
-            return self.forward_pre(*args, **kwargs)
-        return self.forward_post(*args, **kwargs)
 
 
 class TransformerDecoderLayer(nn.Module):
-    """Single Transformer Decoder Layer with self-attention and cross-attention."""
-    
-    def __init__(
-        self,
-        d_model,
-        nhead,
-        dim_feedforward=2048,
-        dropout=0.1,
-        activation="relu",
-        normalize_before=False,
-    ):
+    """
+    Enhanced transformer decoder layer with pre-norm architecture.
+    """
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu"):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
-        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        # Self-attention
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=False)
         
-        # Implementation of Feedforward model
+        # Cross-attention
+        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=False)
+        
+        # Feed-forward network
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
+        # Layer normalization
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)
+        
+        # Dropout
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
 
+        # Activation
         self.activation = _get_activation_fn(activation)
-        self.normalize_before = normalize_before
 
     def with_pos_embed(self, tensor, pos: Optional[torch.Tensor]):
-        """Add position embeddings if provided."""
         return tensor if pos is None else tensor + pos
 
-    def forward_post(
+    def forward(
         self,
         tgt,
         memory,
@@ -308,83 +354,58 @@ class TransformerDecoderLayer(nn.Module):
         query_pos: Optional[torch.Tensor] = None,
     ):
         """
-        Decoder layer with post-normalization.
-        Apply self-attention, then cross-attention, then feed-forward network.
+        Forward pass for decoder layer.
         """
-        # Self attention block
-        q = k = self.with_pos_embed(tgt, query_pos)
-        tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
-        tgt = tgt + self.dropout1(tgt2)
-        tgt = self.norm1(tgt)
-        
-        # Cross attention block
-        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
-                                   key=self.with_pos_embed(memory, pos),
-                                   value=memory, attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
-        tgt = tgt + self.dropout2(tgt2)
-        tgt = self.norm2(tgt)
-        
-        # Feed forward block
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
-        tgt = tgt + self.dropout3(tgt2)
-        tgt = self.norm3(tgt)
-        return tgt
-
-    def forward_pre(
-        self,
-        tgt,
-        memory,
-        tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
-        memory_key_padding_mask: Optional[torch.Tensor] = None,
-        pos: Optional[torch.Tensor] = None,
-        query_pos: Optional[torch.Tensor] = None,
-    ):
-        """
-        Decoder layer with pre-normalization.
-        Apply normalization first, then attention mechanisms.
-        """
-        # Self attention block
+        # Pre-norm for self-attention
         tgt2 = self.norm1(tgt)
+        
+        # Add position embeddings to queries and keys
         q = k = self.with_pos_embed(tgt2, query_pos)
-        tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
+        
+        # Self-attention
+        tgt2, _ = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
+                               key_padding_mask=tgt_key_padding_mask)
+        
+        # Residual connection and dropout
         tgt = tgt + self.dropout1(tgt2)
         
-        # Cross attention block
+        # Pre-norm for cross attention
         tgt2 = self.norm2(tgt)
-        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt2, query_pos),
-                                   key=self.with_pos_embed(memory, pos),
-                                   value=memory, attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
+        
+        # Cross-attention with memory
+        tgt2, _ = self.multihead_attn(
+            query=self.with_pos_embed(tgt2, query_pos),
+            key=self.with_pos_embed(memory, pos),
+            value=memory, attn_mask=memory_mask,
+            key_padding_mask=memory_key_padding_mask,
+        )
+        
+        # Residual connection and dropout
         tgt = tgt + self.dropout2(tgt2)
         
-        # Feed forward block
+        # Pre-norm for FFN
         tgt2 = self.norm3(tgt)
+        
+        # Feed-forward network
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
+        
+        # Residual connection and dropout
         tgt = tgt + self.dropout3(tgt2)
+        
         return tgt
-
-    def forward(self, *args, **kwargs):
-        """Run either pre-norm or post-norm version based on configuration."""
-        if self.normalize_before:
-            return self.forward_pre(*args, **kwargs)
-        return self.forward_post(*args, **kwargs)
 
 
 def _get_clones(module, N):
-    """Clone module N times."""
+    """Create N copies of the module."""
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
 def _get_activation_fn(activation):
-    """Return activation function."""
+    """Return the activation function."""
     if activation == "relu":
         return F.relu
-    elif activation == "gelu":
+    if activation == "gelu":
         return F.gelu
-    else:
-        raise RuntimeError(f"Activation {activation} not supported") 
+    if activation == "glu":
+        return F.glu
+    raise RuntimeError(f"activation should be relu/gelu, not {activation}") 

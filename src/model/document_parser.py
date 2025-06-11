@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Dict
+from typing import Dict, List, Optional, Tuple
 
 import sys
 import os
@@ -52,9 +52,39 @@ class PositionEmbeddingSine(nn.Module):
         return pos
 
 
+class FeaturePyramidNetwork(nn.Module):
+    """
+    Feature Pyramid Network for multi-scale feature fusion.
+    """
+    def __init__(self, in_channels, out_channels=256):
+        super().__init__()
+        self.in_channels = in_channels
+        
+        # Lateral connections
+        self.lateral_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        
+        # Output convolution
+        self.output_conv = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        
+        # Initialize weights
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_uniform_(m.weight, a=1)
+                nn.init.constant_(m.bias, 0)
+                
+    def forward(self, x):
+        # Apply lateral convolution
+        feat = self.lateral_conv(x)
+        
+        # Apply output convolution
+        out = self.output_conv(feat)
+        
+        return out
+
+
 class DocumentParser(nn.Module):
     """
-    Main document parsing model combining visual backbone and transformer.
+    Enhanced document parsing model with advanced features.
     """
     def __init__(self, config=None):
         super().__init__()
@@ -68,8 +98,11 @@ class DocumentParser(nn.Module):
         # Feature dimensions from backbone
         hidden_dim = config["hidden_dim"]
         
-        # Project backbone features to transformer dimension
-        self.input_proj = nn.Conv2d(self.backbone.out_channels, hidden_dim, kernel_size=1)
+        # Feature Pyramid Network for better multi-scale features
+        self.fpn = FeaturePyramidNetwork(self.backbone.out_channels, hidden_dim)
+        
+        # Position embedding
+        self.position_embedding = PositionEmbeddingSine(hidden_dim // 2, normalize=True)
         
         # Build transformer
         self.transformer = Transformer(
@@ -80,17 +113,15 @@ class DocumentParser(nn.Module):
             dim_feedforward=config["dim_feedforward"],
             dropout=config["dropout"],
             activation=config["activation"],
+            stochastic_depth_prob=0.1,  # Add stochastic depth for regularization
         )
-        
-        # Define position embedding
-        self.position_embedding = PositionEmbeddingSine(hidden_dim // 2, normalize=True)
         
         # Query embeddings for the decoder (learnable)
         self.query_embed = nn.Embedding(config["num_queries"], hidden_dim)
         
         # Prediction heads
         num_classes = len(config["entity_classes"])
-        self.class_embed = nn.Linear(hidden_dim, num_classes + 1)  # +1 for background class
+        self.class_embed = MLP(hidden_dim, hidden_dim, num_classes + 1, 3)  # +1 for background class
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)  # 4 for [x1, y1, x2, y2]
         
         # Initialize weights
@@ -99,8 +130,9 @@ class DocumentParser(nn.Module):
     def _init_weights(self):
         """Initialize weights of prediction heads."""
         # Init class embedding
-        nn.init.constant_(self.class_embed.bias, 0)
-        nn.init.orthogonal_(self.class_embed.weight)
+        for layer in self.class_embed.layers:
+            nn.init.xavier_uniform_(layer.weight)
+            nn.init.zeros_(layer.bias)
         
         # Init bbox MLP
         for layer in self.bbox_embed.layers:
@@ -121,6 +153,9 @@ class DocumentParser(nn.Module):
         features = self.backbone(images)
         features = features["feat"]
         
+        # Process features with FPN
+        features = self.fpn(features)
+        
         # Create attention mask (None for now since we process full images)
         mask = torch.zeros((features.shape[0], features.shape[2], features.shape[3]), 
                           dtype=torch.bool, device=features.device)
@@ -128,15 +163,22 @@ class DocumentParser(nn.Module):
         # Create positional embeddings
         pos_embed = self.position_embedding(mask)
         
-        # Project features to transformer dimension
-        features_proj = self.input_proj(features)
-        
         # Run transformer encoder-decoder
-        hs, memory = self.transformer(features_proj, mask, self.query_embed.weight, pos_embed)
+        hs, memory = self.transformer(features, mask, self.query_embed.weight, pos_embed)
         
         # Apply prediction heads to each decoder layer output
-        outputs_class = self.class_embed(hs)  # [batch_size, num_queries, num_classes+1]
-        outputs_coord = self.bbox_embed(hs).sigmoid()  # [batch_size, num_queries, 4]
+        outputs_class = []
+        outputs_coord = []
+        
+        # Process each transformer decoder layer output
+        for lvl in range(hs.shape[0]):
+            outputs_class.append(self.class_embed(hs[lvl]))
+            # Apply sigmoid to normalize box coordinates to [0, 1]
+            outputs_coord.append(self.bbox_embed(hs[lvl]).sigmoid())
+        
+        # Stack outputs from all decoder layers
+        outputs_class = torch.stack(outputs_class)
+        outputs_coord = torch.stack(outputs_coord)
         
         # Return only the last decoder layer outputs
         out = {
@@ -156,7 +198,7 @@ class DocumentParser(nn.Module):
 
 class MLP(nn.Module):
     """
-    Multi-layer perceptron with specified number of layers.
+    Enhanced Multi-layer perceptron with layer normalization and GELU activation.
     
     Args:
         input_dim: Input dimension
@@ -168,13 +210,19 @@ class MLP(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(
-            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
-        )
+        
+        layers = []
+        for i, (n, k) in enumerate(zip([input_dim] + h, h + [output_dim])):
+            layers.append(nn.Linear(n, k))
+            if i < num_layers - 1:
+                layers.append(nn.LayerNorm(k))
+                layers.append(nn.GELU())
+                
+        self.layers = nn.ModuleList(layers)
         
     def forward(self, x):
         for i, layer in enumerate(self.layers):
-            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+            x = layer(x)
         return x
 
 
