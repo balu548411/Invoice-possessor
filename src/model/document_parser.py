@@ -99,7 +99,9 @@ class DocumentParser(nn.Module):
         hidden_dim = config["hidden_dim"]
         
         # Feature Pyramid Network for better multi-scale features
-        self.fpn = FeaturePyramidNetwork(self.backbone.out_channels, hidden_dim)
+        # Using correct output channels for Swin Transformer
+        swin_out_channels = 1024  # Swin Base model output channels
+        self.fpn = FeaturePyramidNetwork(swin_out_channels, hidden_dim)
         
         # Position embedding
         self.position_embedding = PositionEmbeddingSine(hidden_dim // 2, normalize=True)
@@ -131,13 +133,19 @@ class DocumentParser(nn.Module):
         """Initialize weights of prediction heads."""
         # Init class embedding
         for layer in self.class_embed.layers:
-            nn.init.xavier_uniform_(layer.weight)
-            nn.init.zeros_(layer.bias)
+            # Check if it's a linear layer (has weight attribute)
+            if hasattr(layer, 'weight') and layer.weight.dim() >= 2:
+                nn.init.xavier_uniform_(layer.weight)
+                if hasattr(layer, 'bias') and layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
         
         # Init bbox MLP
         for layer in self.bbox_embed.layers:
-            nn.init.xavier_uniform_(layer.weight)
-            nn.init.zeros_(layer.bias)
+            # Check if it's a linear layer (has weight attribute)
+            if hasattr(layer, 'weight') and layer.weight.dim() >= 2:
+                nn.init.xavier_uniform_(layer.weight)
+                if hasattr(layer, 'bias') and layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
     
     def forward(self, images):
         """
@@ -152,6 +160,12 @@ class DocumentParser(nn.Module):
         # Extract features from backbone
         features = self.backbone(images)
         features = features["feat"]
+        
+        # Ensure features have the expected format - Swin transformer outputs [B, C, H, W]
+        # The error suggests features shape is [16, 7, 7, 1024] (B, H, W, C), needs to be [B, C, H, W]
+        if features.dim() == 4 and features.shape[1] < features.shape[3]:
+            # This means we have [B, H, W, C] format, transpose to [B, C, H, W]
+            features = features.permute(0, 3, 1, 2)
         
         # Process features with FPN
         features = self.fpn(features)

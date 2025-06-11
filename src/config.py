@@ -16,14 +16,14 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Data configuration
-IMAGE_SIZE = (1280, 1280)  # Increased resolution for better detail capture
+IMAGE_SIZE = (224, 224)  # Input size for Swin Transformer model
 TRAIN_VAL_SPLIT = 0.85  # Increased training percentage
-BATCH_SIZE = 4  # Reduced to accommodate larger model
+BATCH_SIZE = 16  # Standard batch size for 224x224 images
 NUM_WORKERS = 4
 
 # Model configuration
 MODEL_CONFIG = {
-    "backbone": "swin_base_patch4_window7_224",  # Upgraded to Swin Transformer base model
+    "backbone": "swin_base_patch4_window7_224",  # Swin Transformer base model
     "hidden_dim": 384,  # Increased hidden dimension
     "encoder_layers": 8,  # More encoder layers
     "encoder_heads": 12,  # More attention heads

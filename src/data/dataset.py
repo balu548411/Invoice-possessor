@@ -43,10 +43,10 @@ class DocumentDataset(Dataset):
                 # Document-specific augmentations
                 A.OneOf([
                     A.ElasticTransform(
-                        alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=0.5
+                        alpha=120, sigma=120 * 0.05, p=0.5
                     ),  # Simulate paper wrinkles
                     A.GridDistortion(p=0.5),  # Simulate perspective distortion
-                    A.OpticalDistortion(distort_limit=0.05, shift_limit=0.05, p=0.5),  # Simulate lens effects
+                    A.OpticalDistortion(distort_limit=0.05, p=0.5),  # Simulate lens effects
                 ], p=AUG_CONFIG.get("elastic_transform_prob", 0.2)),
                 
                 # Color and noise transforms
@@ -57,7 +57,7 @@ class DocumentDataset(Dataset):
                         p=0.8
                     ),
                     A.RandomGamma(p=0.5),
-                    A.GaussNoise(var_limit=(5, AUG_CONFIG["gaussian_noise_limit"]), p=0.5),
+                    A.GaussNoise(p=0.5),  # Use default var limit
                 ], p=0.5),
                 
                 # Document artifacts simulation
@@ -70,12 +70,11 @@ class DocumentDataset(Dataset):
                 # Shadow and light simulation
                 A.RandomShadow(shadow_roi=(0, 0, 1, 1), p=AUG_CONFIG.get("random_shadow_prob", 0.2)),
                 
-                # Cutout for robustness
-                A.CoarseDropout(
-                    max_holes=8, max_height=32, max_width=32, 
-                    min_holes=2, min_height=8, min_width=8, 
-                    p=AUG_CONFIG.get("cutout_prob", 0.1)
-                ),
+                # Random dropout augmentation
+                A.OneOf([
+                    A.RandomGridShuffle(grid=(3, 3), p=0.3),
+                    A.GridDropout(ratio=0.2, p=0.3)
+                ], p=AUG_CONFIG.get("cutout_prob", 0.1)),
                 
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2(),

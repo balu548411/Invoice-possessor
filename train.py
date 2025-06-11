@@ -26,7 +26,7 @@ from src.evaluation.metrics import DocumentParsingEvaluator
 
 # For mixed precision training
 try:
-    from torch.cuda.amp import GradScaler, autocast
+    from torch.amp import GradScaler, autocast
     MIXED_PRECISION_AVAILABLE = True
 except ImportError:
     MIXED_PRECISION_AVAILABLE = False
@@ -70,7 +70,7 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch, sca
     start_time = time.time()
     pbar = tqdm(data_loader, desc=f"Epoch {epoch} - Training")
     
-    amp_ctx = autocast() if MIXED_PRECISION_AVAILABLE and TRAIN_CONFIG['mixed_precision'] else nullcontext()
+    amp_ctx = autocast('cuda') if MIXED_PRECISION_AVAILABLE and TRAIN_CONFIG['mixed_precision'] and device.type == 'cuda' else nullcontext()
     
     for i, (images, targets) in enumerate(pbar):
         # Move data to device
@@ -88,7 +88,7 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch, sca
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
         
         # Backward pass with optional mixed precision
-        if MIXED_PRECISION_AVAILABLE and TRAIN_CONFIG['mixed_precision']:
+        if MIXED_PRECISION_AVAILABLE and TRAIN_CONFIG['mixed_precision'] and device.type == 'cuda':
             # AMP: scales loss, backward, and updates scaler for next iteration
             scaler.scale(losses).backward()
             
@@ -298,8 +298,8 @@ def main():
     
     # Set up gradient scaler for mixed precision
     scaler = None
-    if MIXED_PRECISION_AVAILABLE and TRAIN_CONFIG['mixed_precision']:
-        scaler = GradScaler()
+    if MIXED_PRECISION_AVAILABLE and TRAIN_CONFIG['mixed_precision'] and device.type == 'cuda':
+        scaler = GradScaler('cuda')  # Specify 'cuda' device
     
     # Learning rate scheduler
     num_epochs = TRAIN_CONFIG['epochs']
