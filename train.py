@@ -198,6 +198,11 @@ def evaluate(model, criterion, data_loader, device, epoch):
     # Get evaluation metrics
     metrics = evaluator.compute()
     
+    # Standardize metric names for compatibility
+    metrics['map'] = metrics.get('mAP@0.5', 0.0)  # Use mAP@0.5 as the primary metric
+    metrics['map_50'] = metrics.get('mAP@0.5', 0.0)
+    metrics['map_75'] = metrics.get('mAP@0.75', 0.0)
+    
     # Log to wandb
     if LOGGING_CONFIG['use_wandb']:
         wandb.log({
@@ -355,6 +360,16 @@ def main():
         
         # Evaluate
         val_loss, metrics = evaluate(model, criterion, val_loader, device, epoch)
+        
+        # Fix metrics mapping - get appropriate values from evaluator results
+        if 'mAP@0.5' in metrics:
+            metrics['map_50'] = metrics['mAP@0.5']
+        if 'mAP@0.75' in metrics:
+            metrics['map_75'] = metrics['mAP@0.75']
+        # Use mAP@0.5 as the overall map if not present
+        if 'map' not in metrics:
+            metrics['map'] = metrics.get('mAP@0.5', 0.0)
+            
         map_score = metrics['map']
         
         logging.info(f"Validation loss: {val_loss:.4f}, mAP: {map_score:.4f}, "
