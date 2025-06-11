@@ -391,7 +391,8 @@ def get_dataloaders(datasets, batch_size=8, num_workers=4):
             batch_size=batch_size,
             num_workers=num_workers,
             shuffle=(split == "train"),
-            pin_memory=True
+            pin_memory=False,
+            persistent_workers=(num_workers > 0),
         )
         dataloaders[split] = dataloader
     

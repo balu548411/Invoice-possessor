@@ -9,6 +9,7 @@ import json
 import numpy as np
 import random
 from datetime import datetime
+import gc  # Add garbage collection
 
 from config import *
 from data_preprocess import prepare_dataset, get_dataloaders, visualize_sample
@@ -24,6 +25,13 @@ def set_seed(seed):
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def optimize_memory():
+    """Optimize memory usage by clearing cache"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
 
 
 class EarlyStopping:
@@ -62,39 +70,53 @@ def get_lr_scheduler(optimizer, num_warmup_epochs, num_training_epochs, last_epo
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, epoch, device, tb_writer):
-    """Train for one epoch"""
+def train_epoch(model, dataloader, optimizer, scheduler, epoch, device, tb_writer, gradient_accumulation_steps=2):
+    """Train for one epoch with gradient accumulation for memory efficiency"""
     model.train()
     total_loss = 0
     steps = 0
+    
+    optimizer.zero_grad()  # Zero gradients at the beginning
     
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch_idx, batch in enumerate(progress_bar):
         images = batch["image"].to(device)
         labels = batch["label"].to(device)
         
-        # Forward pass
-        optimizer.zero_grad()
-        logits, loss = model(images, labels)
+        # Forward pass with mixed precision
+        with torch.cuda.amp.autocast(enabled=USE_AMP):
+            logits, loss = model(images, labels)
         
-        # Backward pass and optimize
+        # Scale loss for gradient accumulation
+        loss = loss / gradient_accumulation_steps
+        
+        # Backward pass
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # Gradient clipping
-        optimizer.step()
         
-        # Update learning rate
-        scheduler.step()
+        # Update weights every gradient_accumulation_steps
+        if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            # Update weights
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            
+            # Free up memory
+            if batch_idx % 5 == 0:
+                optimize_memory()
         
-        # Update metrics
-        total_loss += loss.item()
+        # Update metrics (use the original loss value for reporting)
+        total_loss += loss.item() * gradient_accumulation_steps
         steps += 1
         
         # Update progress bar
-        progress_bar.set_postfix({"loss": loss.item()})
+        progress_bar.set_postfix({"loss": loss.item() * gradient_accumulation_steps})
         
         # Log to tensorboard
         global_step = epoch * len(dataloader) + batch_idx
-        tb_writer.add_scalar("train/loss", loss.item(), global_step)
+        tb_writer.add_scalar("train/loss", loss.item() * gradient_accumulation_steps, global_step)
         tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], global_step)
         
         # Save checkpoint
@@ -117,12 +139,17 @@ def validate(model, dataloader, device, epoch, tb_writer):
             images = batch["image"].to(device)
             labels = batch["label"].to(device)
             
-            # Forward pass
-            logits, loss = model(images, labels)
+            # Forward pass with mixed precision
+            with torch.cuda.amp.autocast(enabled=USE_AMP):
+                logits, loss = model(images, labels)
             
             # Update metrics
             total_loss += loss.item()
             steps += 1
+            
+            # Free up memory periodically
+            if batch_idx % 5 == 0:
+                optimize_memory()
     
     avg_loss = total_loss / steps
     
@@ -186,11 +213,14 @@ def train_model(args):
     
     # Create optimizer and scheduler
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    num_training_steps = NUM_EPOCHS * len(dataloaders["train"])
     scheduler = get_lr_scheduler(optimizer, WARMUP_EPOCHS, NUM_EPOCHS)
     
     # Initialize early stopping
     early_stopping = EarlyStopping(patience=EARLY_STOPPING_PATIENCE)
+    
+    # Set gradient accumulation steps for memory efficiency
+    # Smaller batch size with more accumulation steps is memory efficient
+    gradient_accumulation_steps = 2  # Effective batch size = BATCH_SIZE * gradient_accumulation_steps
     
     # Load checkpoint if resume training
     start_epoch = 0
@@ -199,47 +229,73 @@ def train_model(args):
         start_epoch = load_checkpoint(model, optimizer, scheduler, args.checkpoint)
         start_epoch += 1  # Start from the next epoch
     
-    # Mixed precision training
+    # Initialize AMP scaler if using mixed precision
     scaler = torch.cuda.amp.GradScaler() if USE_AMP else None
     
-    # Training loop
+    # Print training configuration
+    print(f"Training configuration:")
+    print(f"- Batch size: {BATCH_SIZE}")
+    print(f"- Gradient accumulation steps: {gradient_accumulation_steps}")
+    print(f"- Effective batch size: {BATCH_SIZE * gradient_accumulation_steps}")
+    print(f"- Learning rate: {LEARNING_RATE}")
+    print(f"- Mixed precision: {USE_AMP}")
+    
+    # Start training
     print("Starting training...")
-    best_val_loss = float("inf")
+    best_val_loss = float('inf')
+    
+    # Pre-optimize memory
+    optimize_memory()
     
     for epoch in range(start_epoch, NUM_EPOCHS):
-        # Train for one epoch
-        train_loss = train_epoch(model, dataloaders["train"], optimizer, scheduler, epoch, device, tb_writer)
-        print(f"Epoch {epoch} | Train Loss: {train_loss:.4f}")
+        # Train
+        train_loss = train_epoch(
+            model, 
+            dataloaders["train"], 
+            optimizer, 
+            scheduler, 
+            epoch, 
+            device, 
+            tb_writer,
+            gradient_accumulation_steps
+        )
+        
+        # Optimize memory before validation
+        optimize_memory()
         
         # Validate
         val_loss = validate(model, dataloaders["val"], device, epoch, tb_writer)
-        print(f"Epoch {epoch} | Val Loss: {val_loss:.4f}")
         
-        # Check for early stopping
-        early_stopping(val_loss)
-        if early_stopping.early_stop:
-            print("Early stopping triggered!")
-            break
-            
+        # Print epoch summary
+        print(f"Epoch {epoch} - Train loss: {train_loss:.4f}, Val loss: {val_loss:.4f}")
+        
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_path = os.path.join(MODEL_SAVE_DIR, "best_model.pt")
             save_checkpoint(model, optimizer, scheduler, epoch, best_model_path)
-            
-        # Save regular checkpoint
+            print(f"New best model saved with validation loss: {best_val_loss:.4f}")
+        
+        # Regular epoch checkpoint
         checkpoint_path = os.path.join(MODEL_SAVE_DIR, f"checkpoint_epoch{epoch}.pt")
         save_checkpoint(model, optimizer, scheduler, epoch, checkpoint_path)
+        
+        # Check for early stopping
+        early_stopping(val_loss)
+        if early_stopping.early_stop:
+            print("Early stopping triggered")
+            break
+        
+        # Optimize memory between epochs
+        optimize_memory()
     
     # Save final model
     final_model_path = os.path.join(MODEL_SAVE_DIR, "final_model.pt")
-    save_checkpoint(model, optimizer, scheduler, NUM_EPOCHS, final_model_path)
+    save_checkpoint(model, optimizer, scheduler, NUM_EPOCHS-1, final_model_path)
+    print(f"Training completed. Final model saved to {final_model_path}")
     
     # Close tensorboard writer
     tb_writer.close()
-    
-    print("Training completed!")
-    return best_val_loss
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ LOG_DIR = os.path.join(OUTPUT_DIR, 'logs')
 # Dataset settings
 TRAIN_VAL_TEST_SPLIT = [0.8, 0.1, 0.1]
 MAX_SEQ_LENGTH = 512
-MAX_IMAGE_SIZE = (800, 800)  # (height, width)
+MAX_IMAGE_SIZE = (600, 600)  # Reduced from (800, 800) to save memory
 RANDOM_SEED = 42
 
 # Model architecture
@@ -29,8 +29,8 @@ MODEL_CONFIG = {
 }
 
 # Training settings
-BATCH_SIZE = 8
-NUM_WORKERS = 4
+BATCH_SIZE = 4  # Reduced from 8 to reduce memory usage
+NUM_WORKERS = 2  # Reduced from 4 to reduce shared memory usage
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 NUM_EPOCHS = 10
