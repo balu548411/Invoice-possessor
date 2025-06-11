@@ -1,6 +1,7 @@
 import os
 import torch
 import numpy as np
+import numpy  # For direct access to numpy modules
 from PIL import Image
 import cv2
 import albumentations as A
@@ -60,8 +61,25 @@ class DocumentPredictor:
         # Build model
         model = build_model()
         
-        # Load checkpoint
-        checkpoint = torch.load(model_path, map_location=self.device)
+        # Load checkpoint with proper handling of PyTorch 2.6 safe_globals
+        try:
+            print(f"Loading checkpoint using safe_globals...")
+            # Use context manager to temporarily allow numpy types
+            with torch.serialization.safe_globals([numpy.dtype, np.core.multiarray.scalar]):
+                checkpoint = torch.load(model_path, map_location=self.device)
+        except Exception as e:
+            print(f"Error loading with safe_globals: {e}")
+            try:
+                print(f"Trying with weights_only=False...")
+                checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+            except Exception as e2:
+                print(f"Error loading with weights_only=False: {e2}")
+                print("Attempting one more fallback method...")
+                # Very unsafe but may work as last resort
+                import pickle
+                import io
+                with open(model_path, 'rb') as f:
+                    checkpoint = torch.load(io.BytesIO(pickle.load(f)), map_location=self.device)
         
         # Load weights
         if 'model' in checkpoint:
