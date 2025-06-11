@@ -16,6 +16,7 @@ from pathlib import Path
 import time
 import gc
 from contextlib import nullcontext
+import torch.nn.functional as F
 
 # Import project modules
 from src.config import TRAIN_CONFIG, MODEL_CONFIG, BATCH_SIZE, NUM_WORKERS, MODEL_DIR, LOG_DIR, LOGGING_CONFIG
@@ -59,7 +60,7 @@ def get_cosine_schedule_with_warmup(
 
 
 def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch, scaler=None, lr_scheduler=None):
-    """Train the model for one epoch with optional mixed precision."""
+    """Train one epoch."""
     model.train()
     criterion.train()
     
@@ -70,43 +71,81 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch, sca
     start_time = time.time()
     pbar = tqdm(data_loader, desc=f"Epoch {epoch} - Training")
     
-    amp_ctx = autocast('cuda') if MIXED_PRECISION_AVAILABLE and TRAIN_CONFIG['mixed_precision'] and device.type == 'cuda' else nullcontext()
-    
     for i, (images, targets) in enumerate(pbar):
         # Move data to device
         images = images.to(device)
         targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v 
                    for k, v in t.items()} for t in targets]
         
-        # Forward pass with optional mixed precision
+        # Check if we have any ground truth boxes
+        num_gt_boxes = sum(len(t['boxes']) for t in targets)
+        
+        # Skip this batch if no ground truth boxes (prevents NaN losses)
+        if num_gt_boxes == 0:
+            print(f"WARNING: Skipping batch {i} - No ground truth boxes found!")
+            continue
+            
+        # Debug: Print targets information for the first few batches
+        if epoch == 0 and i < 2:
+            print(f"\nDEBUG (batch {i}): Targets summary:")
+            for t_idx, target in enumerate(targets):
+                print(f" - Target {t_idx}: {len(target['boxes'])} boxes, {len(target['labels'])} labels")
+                if len(target['boxes']) > 0:
+                    print(f"   - First box: {target['boxes'][0]}")
+                    print(f"   - First label: {target['labels'][0]}")
+        
+        # Zero gradients
         optimizer.zero_grad()
         
-        with amp_ctx:
+        # Forward pass with autocast for mixed precision
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                outputs = model(images)
+                loss_dict = criterion(outputs, targets)
+                weight_dict = criterion.weight_dict
+                losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        else:
             outputs = model(images)
             loss_dict = criterion(outputs, targets)
             weight_dict = criterion.weight_dict
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
         
-        # Backward pass with optional mixed precision
-        if MIXED_PRECISION_AVAILABLE and TRAIN_CONFIG['mixed_precision'] and device.type == 'cuda':
-            # AMP: scales loss, backward, and updates scaler for next iteration
-            scaler.scale(losses).backward()
+        # Debug: Print prediction information for the first few batches
+        if epoch == 0 and i < 2:
+            print(f"\nDEBUG (batch {i}): Outputs summary:")
+            print(f" - Pred logits shape: {outputs['pred_logits'].shape}")
+            print(f" - Pred boxes shape: {outputs['pred_boxes'].shape}")
             
+            # Check prediction distribution
+            pred_probs = F.softmax(outputs['pred_logits'], dim=-1)
+            background_probs = pred_probs[:, :, -1]  # Last class is background
+            bg_min, bg_max = background_probs.min().item(), background_probs.max().item()
+            print(f" - Background prob range: {bg_min:.4f} to {bg_max:.4f}")
+            
+            # Check if predictions are mostly background
+            non_bg_count = (background_probs < 0.9).sum().item()
+            total_preds = background_probs.numel()
+            print(f" - Non-background predictions: {non_bg_count}/{total_preds} ({100*non_bg_count/total_preds:.2f}%)")
+            
+            # Check loss values
+            print(f" - Losses: {', '.join([f'{k}: {v.item():.4f}' for k, v in loss_dict.items()])}")
+            
+        # Backward pass with scaler for mixed precision
+        if scaler is not None:
+            scaler.scale(losses).backward()
             if TRAIN_CONFIG['clip_max_norm'] > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), TRAIN_CONFIG['clip_max_norm'])
-            
             scaler.step(optimizer)
             scaler.update()
         else:
-            # Standard backward pass
             losses.backward()
             if TRAIN_CONFIG['clip_max_norm'] > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), TRAIN_CONFIG['clip_max_norm'])
             optimizer.step()
         
-        # Update learning rate for schedulers that update per step
-        if lr_scheduler is not None and TRAIN_CONFIG.get('lr_scheduler') == 'cosine':
+        # Update LR scheduler if using cosine schedule with per-iteration updates
+        if lr_scheduler is not None:
             lr_scheduler.step()
         
         # Update running losses
@@ -331,7 +370,9 @@ def main():
     checkpoint_path = Path(MODEL_DIR) / "checkpoint_latest.pth"
     if checkpoint_path.exists():
         logging.info(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # Use context manager to temporarily allow the numpy global
+        with torch.serialization.safe_globals([np.core.multiarray.scalar]):
+            checkpoint = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         if 'lr_scheduler' in checkpoint:

@@ -114,6 +114,12 @@ class DocumentDataset(Dataset):
         # Process the extracted entities from the label
         label_fields = label_data.get('data', {})
         
+        # Debug print for first few samples
+        if idx < 5:
+            print(f"\nDEBUG: Label path: {label_path}")
+            print(f"DEBUG: Label fields: {list(label_fields.keys())}")
+            print(f"DEBUG: Number of fields: {len(label_fields)}")
+        
         for field_name, field_info in label_fields.items():
             if field_name == 'Items':  # Special handling for item lists
                 continue  # Items are complex and handled separately
@@ -129,6 +135,10 @@ class DocumentDataset(Dataset):
             bounding_regions = []
             if 'bounding_regions' in field_info:
                 bounding_regions = field_info['bounding_regions']
+            
+            # Debug print for first few samples
+            if idx < 5 and field_name not in ['Items']:
+                print(f"DEBUG: Field: {field_name}, Value: {value}, Confidence: {confidence}, Regions: {len(bounding_regions)}")
             
             for region in bounding_regions:
                 # Extract polygon points for this region
@@ -160,6 +170,13 @@ class DocumentDataset(Dataset):
                 if class_id >= 0:
                     classes.append(class_id)
                     texts.append(str(value))
+        
+        # Debug print total boxes added
+        if idx < 5:
+            print(f"DEBUG: Total boxes extracted: {len(boxes)}")
+            print(f"DEBUG: Total classes extracted: {len(classes)}")
+            if len(boxes) > 0:
+                print(f"DEBUG: Sample box: {boxes[0]}")
         
         # Apply transformations to the image
         if self.transform:

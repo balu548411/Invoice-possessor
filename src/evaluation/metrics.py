@@ -42,6 +42,13 @@ class DocumentParsingEvaluator:
         # Get batch size
         batch_size = len(targets)
         
+        # Debug: Print some information about predictions
+        print(f"\nDEBUG: Prediction shapes: logits={pred_logits.shape}, boxes={pred_boxes.shape}")
+        print(f"DEBUG: Background class probability range: {pred_logits[:, :, -1].min().item():.4f} to {pred_logits[:, :, -1].max().item():.4f}")
+        
+        total_boxes = 0
+        total_valid_pred = 0
+        
         # Process each sample in the batch
         for i in range(batch_size):
             # Get predictions for this sample
@@ -53,6 +60,10 @@ class DocumentParsingEvaluator:
             gt_boxes = target['boxes']
             gt_labels = target['labels']
             
+            # Debug: Print ground truth info
+            print(f"DEBUG: Sample {i}: GT boxes={len(gt_boxes)}, GT labels={len(gt_labels)}")
+            total_boxes += len(gt_boxes)
+            
             # Apply score threshold and get top predictions
             # We use the background class (last one) as the score threshold
             scores = 1 - logits[:, -1].sigmoid()
@@ -60,7 +71,7 @@ class DocumentParsingEvaluator:
             pred_labels = torch.argmax(logits[:, :-1], dim=-1)
             
             # Filter predictions with a score threshold
-            score_thresh = 0.5
+            score_thresh = 0.1  # Lower threshold for debugging
             keep = scores > score_thresh
             
             # Apply filtering
@@ -68,11 +79,17 @@ class DocumentParsingEvaluator:
             pred_labels = pred_labels[keep]
             boxes = boxes[keep]
             
+            # Debug: Print score info
+            print(f"DEBUG: Sample {i}: Valid predictions={len(scores)}/{len(logits)} (thresh={score_thresh})")
+            print(f"DEBUG: Score range: {scores.min().item() if len(scores) > 0 else 0:.4f} to {scores.max().item() if len(scores) > 0 else 0:.4f}")
+            total_valid_pred += len(scores)
+            
             # Sort by decreasing score for NMS
-            sort_idx = torch.argsort(scores, descending=True)
-            scores = scores[sort_idx]
-            pred_labels = pred_labels[sort_idx]
-            boxes = boxes[sort_idx]
+            if len(scores) > 0:
+                sort_idx = torch.argsort(scores, descending=True)
+                scores = scores[sort_idx]
+                pred_labels = pred_labels[sort_idx]
+                boxes = boxes[sort_idx]
             
             # Convert boxes from [cx, cy, w, h] to [x1, y1, x2, y2]
             boxes = box_cxcywh_to_xyxy(boxes)
@@ -86,6 +103,9 @@ class DocumentParsingEvaluator:
                 gt_boxes=gt_boxes.cpu().numpy(),
                 gt_labels=gt_labels.cpu().numpy()
             )
+        
+        # Debug: Print batch summary
+        print(f"DEBUG: Batch summary: Total GT boxes={total_boxes}, Total valid predictions={total_valid_pred}")
     
     def eval_sample(self, pred_boxes, pred_labels, pred_scores, gt_boxes, gt_labels):
         """
