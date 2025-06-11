@@ -30,10 +30,13 @@ class DocumentDataset(Dataset):
         self.image_size = image_size
         self.is_training = is_training
         
-        # Set up transforms
+        # Set up transforms - always include resize at the beginning to ensure consistent sizes
+        # Remove always_apply parameter from Resize transform
         if is_training:
             self.transform = A.Compose([
+                # Always resize first to ensure consistent tensor shapes
                 A.Resize(height=image_size[0], width=image_size[1]),
+                
                 # Mild geometric transforms for document images
                 A.RandomRotate90(p=0.1),
                 A.Rotate(limit=AUG_CONFIG["rotate_limit"], p=0.3),
@@ -75,6 +78,9 @@ class DocumentDataset(Dataset):
                     A.RandomGridShuffle(grid=(3, 3), p=0.3),
                     A.GridDropout(ratio=0.2, p=0.3)
                 ], p=AUG_CONFIG.get("cutout_prob", 0.1)),
+                
+                # Final resize to ensure consistent size after augmentations
+                A.Resize(height=image_size[0], width=image_size[1]),
                 
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2(),
