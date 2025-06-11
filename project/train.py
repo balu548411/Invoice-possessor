@@ -10,6 +10,7 @@ import numpy as np
 import random
 from datetime import datetime
 import gc  # Add garbage collection
+import torch.multiprocessing
 
 from config import *
 from data_preprocess import prepare_dataset, get_dataloaders, visualize_sample
@@ -252,6 +253,9 @@ def train_model(args):
     
     # Pre-optimize memory
     optimize_memory()
+    
+    # Set multiprocessing sharing strategy
+    torch.multiprocessing.set_sharing_strategy('file_system')
     
     for epoch in range(start_epoch, NUM_EPOCHS):
         # Train
