@@ -30,6 +30,9 @@ class DocumentDataset(Dataset):
         self.image_size = image_size
         self.is_training = is_training
         
+        # Print dataset size information
+        print(f"Dataset initialized with {len(self.image_paths)} images and {len(self.label_paths)} labels")
+        
         # Set up transforms - always include resize at the beginning to ensure consistent sizes
         # Remove always_apply parameter from Resize transform
         if is_training:
@@ -91,20 +94,61 @@ class DocumentDataset(Dataset):
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2(),
             ])
+        
+        # Preload and validate labels
+        self.valid_indices = []
+        for i, (img_path, label_path) in enumerate(zip(self.image_paths, self.label_paths)):
+            # Check if both files exist
+            if not os.path.exists(img_path) or not os.path.exists(label_path):
+                continue
+                
+            try:
+                # Validate that we can load the label file
+                with open(label_path, 'r') as f:
+                    label_data = json.load(f)
+                # Check if label contains data field
+                if 'data' not in label_data:
+                    print(f"Warning: No 'data' field in label {label_path}")
+                    continue
+                    
+                # Add to valid indices
+                self.valid_indices.append(i)
+            except Exception as e:
+                print(f"Error loading {label_path}: {e}")
+        
+        print(f"Found {len(self.valid_indices)} valid samples out of {len(self.image_paths)}")
     
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.valid_indices)
     
     def __getitem__(self, idx):
+        # Map to valid index
+        idx = self.valid_indices[idx]
+        
         # Load image
         image_path = self.image_paths[idx]
-        image = cv2.imread(str(image_path))
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        try:
+            image = cv2.imread(str(image_path))
+            if image is None:
+                raise ValueError(f"Could not read image {image_path}")
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            print(f"Error reading image {image_path}: {e}")
+            # Return a dummy sample
+            return self._create_dummy_sample()
+        
+        # Get original image dimensions
+        orig_h, orig_w = image.shape[:2]
         
         # Load label
         label_path = self.label_paths[idx]
-        with open(label_path, 'r') as f:
-            label_data = json.load(f)
+        try:
+            with open(label_path, 'r') as f:
+                label_data = json.load(f)
+        except Exception as e:
+            print(f"Error reading label {label_path}: {e}")
+            # Return a dummy sample
+            return self._create_dummy_sample()
         
         # Extract entity bounding boxes and classes
         boxes = []
@@ -114,12 +158,7 @@ class DocumentDataset(Dataset):
         # Process the extracted entities from the label
         label_fields = label_data.get('data', {})
         
-        # Debug print for first few samples
-        if idx < 5:
-            print(f"\nDEBUG: Label path: {label_path}")
-            print(f"DEBUG: Label fields: {list(label_fields.keys())}")
-            print(f"DEBUG: Number of fields: {len(label_fields)}")
-        
+        # Process each field in the label data
         for field_name, field_info in label_fields.items():
             if field_name == 'Items':  # Special handling for item lists
                 continue  # Items are complex and handled separately
@@ -136,9 +175,11 @@ class DocumentDataset(Dataset):
             if 'bounding_regions' in field_info:
                 bounding_regions = field_info['bounding_regions']
             
-            # Debug print for first few samples
-            if idx < 5 and field_name not in ['Items']:
-                print(f"DEBUG: Field: {field_name}, Value: {value}, Confidence: {confidence}, Regions: {len(bounding_regions)}")
+            # Get class id for this field
+            from config import MODEL_CONFIG
+            class_id = MODEL_CONFIG["entity_classes"].get(field_name, -1)
+            if class_id < 0:
+                continue  # Skip fields that don't have a class mapping
             
             for region in bounding_regions:
                 # Extract polygon points for this region
@@ -150,33 +191,43 @@ class DocumentDataset(Dataset):
                 x_coords = [p['x'] for p in polygon]
                 y_coords = [p['y'] for p in polygon]
                 
-                x_min = min(x_coords)
-                y_min = min(y_coords)
-                x_max = max(x_coords)
-                y_max = max(y_coords)
-                
-                # Normalize box coordinates based on image dimensions
-                h, w = image.shape[:2]
-                x_min, x_max = x_min / w, x_max / w
-                y_min, y_max = y_min / h, y_max / h
-                
-                # Create box with normalized coordinates [x_min, y_min, x_max, y_max]
-                box = [x_min, y_min, x_max, y_max]
-                boxes.append(box)
-                
-                # Map field name to class id
-                from config import MODEL_CONFIG
-                class_id = MODEL_CONFIG["entity_classes"].get(field_name, -1)
-                if class_id >= 0:
+                try:
+                    x_min = min(x_coords)
+                    y_min = min(y_coords)
+                    x_max = max(x_coords)
+                    y_max = max(y_coords)
+                    
+                    # Skip invalid boxes
+                    if x_min >= x_max or y_min >= y_max:
+                        continue
+                        
+                    # Normalize box coordinates based on image dimensions
+                    x_min, x_max = x_min / orig_w, x_max / orig_w
+                    y_min, y_max = y_min / orig_h, y_max / orig_h
+                    
+                    # Clamp values to [0, 1]
+                    x_min = max(0, min(1, x_min))
+                    y_min = max(0, min(1, y_min))
+                    x_max = max(0, min(1, x_max))
+                    y_max = max(0, min(1, y_max))
+                    
+                    # Convert to center-width-height format
+                    x_c = (x_min + x_max) / 2
+                    y_c = (y_min + y_max) / 2
+                    w = x_max - x_min
+                    h = y_max - y_min
+                    
+                    # Skip boxes that are too small
+                    if w <= 0.01 or h <= 0.01:
+                        continue
+                    
+                    # Create box with normalized coordinates [cx, cy, w, h]
+                    box = [x_c, y_c, w, h]
+                    boxes.append(box)
                     classes.append(class_id)
                     texts.append(str(value))
-        
-        # Debug print total boxes added
-        if idx < 5:
-            print(f"DEBUG: Total boxes extracted: {len(boxes)}")
-            print(f"DEBUG: Total classes extracted: {len(classes)}")
-            if len(boxes) > 0:
-                print(f"DEBUG: Sample box: {boxes[0]}")
+                except Exception as e:
+                    print(f"Error processing box in {label_path}: {e}")
         
         # Apply transformations to the image
         if self.transform:
@@ -189,10 +240,26 @@ class DocumentDataset(Dataset):
             "labels": torch.tensor(classes, dtype=torch.int64) if classes else torch.zeros((0,), dtype=torch.int64),
             "texts": texts,
             "image_id": torch.tensor([idx]),
-            "orig_size": torch.tensor([image.shape[1], image.shape[2]]),
+            "orig_size": torch.tensor([orig_h, orig_w]),
         }
         
         return image, target
+    
+    def _create_dummy_sample(self):
+        """Create a dummy sample for error cases."""
+        # Create a blank image of the target size
+        dummy_image = torch.zeros((3, self.image_size[0], self.image_size[1]), dtype=torch.float32)
+        
+        # Create an empty target
+        dummy_target = {
+            "boxes": torch.zeros((0, 4), dtype=torch.float32),
+            "labels": torch.zeros((0,), dtype=torch.int64),
+            "texts": [],
+            "image_id": torch.tensor([0]),
+            "orig_size": torch.tensor([self.image_size[0], self.image_size[1]]),
+        }
+        
+        return dummy_image, dummy_target
 
 
 def get_dataset_splits(train_ratio=0.8, shuffle=True, seed=42):
@@ -208,7 +275,8 @@ def get_dataset_splits(train_ratio=0.8, shuffle=True, seed=42):
         train_dataset, val_dataset
     """
     # Get all image paths
-    image_paths = list(IMAGES_DIR.glob('*.jpg'))
+    image_paths = list(IMAGES_DIR.glob('*.jpg')) + list(IMAGES_DIR.glob('*.jpeg')) + list(IMAGES_DIR.glob('*.png'))
+    print(f"Found {len(image_paths)} images")
     
     # Find corresponding label paths
     all_data = []
@@ -216,6 +284,8 @@ def get_dataset_splits(train_ratio=0.8, shuffle=True, seed=42):
         label_path = LABELS_DIR / f"{img_path.stem}.json"
         if label_path.exists():
             all_data.append((img_path, label_path))
+    
+    print(f"Found {len(all_data)} image-label pairs")
     
     # Shuffle if needed
     if shuffle:
@@ -226,6 +296,9 @@ def get_dataset_splits(train_ratio=0.8, shuffle=True, seed=42):
     split_idx = int(len(all_data) * train_ratio)
     train_data = all_data[:split_idx]
     val_data = all_data[split_idx:]
+    
+    print(f"Training set: {len(train_data)} samples")
+    print(f"Validation set: {len(val_data)} samples")
     
     # Create datasets
     train_img_paths, train_label_paths = zip(*train_data) if train_data else ([], [])

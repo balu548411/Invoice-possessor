@@ -128,7 +128,7 @@ class DocumentParsingEvaluator:
                     'pred_scores': pred_scores,
                     'gt_boxes': np.zeros((0, 4)),
                     'gt_labels': np.zeros((0,), dtype=np.int64),
-                    'matched': []
+                    'matched': {}  # Initialize as empty dictionary instead of list
                 })
             return
         
@@ -140,7 +140,7 @@ class DocumentParsingEvaluator:
                 'pred_scores': np.zeros((0,)),
                 'gt_boxes': gt_boxes,
                 'gt_labels': gt_labels,
-                'matched': []
+                'matched': {}  # Initialize as empty dictionary instead of list
             })
             return
         
@@ -214,21 +214,28 @@ class DocumentParsingEvaluator:
         all_preds = []
         for stat in self.stats:
             pred_scores = stat['pred_scores']
-            for i, score in enumerate(pred_scores):
-                match_found = False
-                for thresh, matches in stat['matched'].items():
-                    if thresh == iou_thresh:
-                        for match in matches:
+            # Check if 'matched' is a dict or a list and handle accordingly
+            if isinstance(stat['matched'], dict):
+                for i, score in enumerate(pred_scores):
+                    match_found = False
+                    if iou_thresh in stat['matched']:
+                        for match in stat['matched'][iou_thresh]:
                             if match[0] == i:  # This prediction was matched
                                 match_found = True
                                 break
-                    if match_found:
-                        break
-                
-                all_preds.append({
-                    'score': score,
-                    'correct': match_found
-                })
+                    
+                    all_preds.append({
+                        'score': score,
+                        'correct': match_found
+                    })
+            else:
+                # Handle case where 'matched' is a list (empty or otherwise)
+                for i, score in enumerate(pred_scores):
+                    # If 'matched' is a list, assume no matches were found
+                    all_preds.append({
+                        'score': score,
+                        'correct': False
+                    })
         
         # Sort predictions by decreasing score
         all_preds.sort(key=lambda x: x['score'], reverse=True)
@@ -314,18 +321,21 @@ class DocumentParsingEvaluator:
             
             # Filter matched pairs for this class
             matched_filtered = {}
-            for thresh, matches in stat['matched'].items():
-                if thresh == iou_thresh:
+            
+            # Check if 'matched' is a dict or a list
+            if isinstance(stat['matched'], dict):
+                if iou_thresh in stat['matched']:
                     # A match is valid if both the prediction and ground truth are of the desired class
                     valid_matches = []
-                    for p_idx, gt_idx, iou in matches:
+                    for p_idx, gt_idx, iou in stat['matched'][iou_thresh]:
                         if p_idx in pred_indices and gt_idx in gt_indices:
                             # Convert from global to local indices
                             p_local_idx = list(pred_indices).index(p_idx)
                             gt_local_idx = list(gt_indices).index(gt_idx)
                             valid_matches.append((p_local_idx, gt_local_idx, iou))
                     
-                    matched_filtered[thresh] = valid_matches
+                    matched_filtered[iou_thresh] = valid_matches
+            # If 'matched' is a list, just initialize as empty dict
             
             # Add to filtered stats
             filtered_stats.append({
