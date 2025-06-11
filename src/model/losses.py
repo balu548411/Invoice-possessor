@@ -95,10 +95,18 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.eos_coef = eos_coef
         self.losses = losses if losses is not None else ['labels', 'boxes', 'cardinality']
-        empty_weight = torch.ones(num_classes + 1)
-        empty_weight[-1] = self.eos_coef
-        self.register_buffer('empty_weight', empty_weight)
         
+        # Initialize empty_weight and move to appropriate device when needed
+        self.register_buffer('empty_weight', None)
+        
+    def _get_empty_weight(self, device):
+        """Create empty_weight tensor on the correct device when needed"""
+        if self.empty_weight is None or self.empty_weight.device != device:
+            empty_weight = torch.ones(self.num_classes + 1, device=device)
+            empty_weight[-1] = self.eos_coef
+            self.empty_weight = empty_weight
+        return self.empty_weight
+    
     def loss_labels(self, outputs, targets, indices, num_boxes):
         """
         Classification loss (NLL).
@@ -123,7 +131,10 @@ class SetCriterion(nn.Module):
                                   dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
         
-        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+        # Get empty_weight on the correct device
+        empty_weight = self._get_empty_weight(src_logits.device)
+        
+        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, empty_weight)
         losses = {'loss_ce': loss_ce}
         
         return losses
