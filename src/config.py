@@ -53,12 +53,12 @@ MODEL_CONFIG = {
 # Training configuration
 TRAIN_CONFIG = {
     "epochs": 150,  # More training epochs
-    "lr": 2e-4,  # Slightly higher base learning rate
-    "lr_backbone": 2e-5,  # Slightly higher backbone learning rate
+    "lr": 1e-5,  # Lower starting learning rate for better initialization
+    "lr_backbone": 1e-6,  # Lower backbone learning rate
     "weight_decay": 1e-4,
-    "warmup_epochs": 5,  # Learning rate warmup
+    "warmup_epochs": 10,  # Longer warmup period
     "lr_scheduler": "cosine",  # Cosine annealing scheduler
-    "min_lr": 1e-6,  # Minimum learning rate for cosine scheduler
+    "min_lr": 1e-7,  # Minimum learning rate for cosine scheduler
     "clip_max_norm": 0.1,
     "early_stopping_patience": 15,  # More patience for early stopping
     "mixed_precision": True,  # Enable mixed precision training

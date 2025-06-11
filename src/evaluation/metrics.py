@@ -66,12 +66,13 @@ class DocumentParsingEvaluator:
             
             # Apply score threshold and get top predictions
             # We use the background class (last one) as the score threshold
-            scores = 1 - logits[:, -1].sigmoid()
+            # 1 - background_prob = foreground_prob
+            scores = 1 - logits[:, -1].sigmoid()  # Use foreground probability
             # Get non-background class indices
             pred_labels = torch.argmax(logits[:, :-1], dim=-1)
             
-            # Filter predictions with a score threshold
-            score_thresh = 0.1  # Lower threshold for debugging
+            # Filter predictions with a score threshold - use a very low threshold for debugging
+            score_thresh = 0.05  # Very low threshold to see if any predictions are being made
             keep = scores > score_thresh
             
             # Apply filtering

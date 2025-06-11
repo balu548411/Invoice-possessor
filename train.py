@@ -371,19 +371,54 @@ def main():
     checkpoint_path = Path(MODEL_DIR) / "checkpoint_latest.pth"
     if checkpoint_path.exists():
         logging.info(f"Loading checkpoint from {checkpoint_path}")
-        # Use context manager to temporarily allow the numpy globals
-        with torch.serialization.safe_globals([numpy.dtype, np.core.multiarray.scalar]):
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        if 'lr_scheduler' in checkpoint:
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        start_epoch = checkpoint['epoch'] + 1
-        if 'map' in checkpoint:
-            best_map = checkpoint['map']
-        if 'scaler' in checkpoint and scaler is not None:
-            scaler.load_state_dict(checkpoint['scaler'])
-        logging.info(f"Resuming from epoch {start_epoch} with best mAP: {best_map:.4f}")
+        try:
+            # First try with safe_globals
+            with torch.serialization.safe_globals([numpy.dtype, np.core.multiarray.scalar]):
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+                logging.info("Checkpoint loaded successfully with safe_globals")
+        except Exception as e:
+            logging.warning(f"Failed to load checkpoint with safe_globals: {e}")
+            try:
+                # Try with weights_only=False as a fallback
+                checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+                logging.info("Checkpoint loaded successfully with weights_only=False")
+            except Exception as e2:
+                logging.error(f"Failed to load checkpoint with weights_only=False: {e2}")
+                logging.info("Starting from scratch with new model")
+                checkpoint = None
+        
+        if checkpoint is not None:
+            # Load model weights
+            try:
+                model.load_state_dict(checkpoint['model'])
+                logging.info("Model state loaded successfully")
+                
+                # Verify the model weights are not all zeros or close to it
+                total_params = 0
+                zero_params = 0
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        total_params += param.numel()
+                        zero_params += (param.abs() < 1e-6).sum().item()
+                zero_ratio = zero_params / max(total_params, 1)
+                logging.info(f"Model parameter check: {zero_ratio:.4f} ({zero_params}/{total_params}) are close to zero")
+                
+                if zero_ratio > 0.9:
+                    logging.warning("WARNING: More than 90% of model parameters are close to zero!")
+                
+                # Load optimizer and other state
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                if 'lr_scheduler' in checkpoint:
+                    lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                start_epoch = checkpoint['epoch'] + 1
+                if 'map' in checkpoint:
+                    best_map = checkpoint['map']
+                if 'scaler' in checkpoint and scaler is not None:
+                    scaler.load_state_dict(checkpoint['scaler'])
+                logging.info(f"Resuming from epoch {start_epoch} with best mAP: {best_map:.4f}")
+            except Exception as e:
+                logging.error(f"Error loading model state: {e}")
+                logging.info("Starting from scratch with new model")
     
     # Training loop
     logging.info(f"Starting training for {num_epochs} epochs")
