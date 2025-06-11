@@ -77,6 +77,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch, device, tb_write
     steps = 0
     
     optimizer.zero_grad()  # Zero gradients at the beginning
+    scaler = torch.cuda.amp.GradScaler() if USE_AMP else None
     
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch_idx, batch in enumerate(progress_bar):
@@ -90,16 +91,24 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch, device, tb_write
         # Scale loss for gradient accumulation
         loss = loss / gradient_accumulation_steps
         
-        # Backward pass
-        loss.backward()
+        # Backward pass with mixed precision if enabled
+        if USE_AMP:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         
         # Update weights every gradient_accumulation_steps
         if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
-            # Clip gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
-            # Update weights
-            optimizer.step()
+            # Clip gradients and optimizer step with mixed precision
+            if USE_AMP:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # Gradient clipping
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # Gradient clipping
+                optimizer.step()
+                
             scheduler.step()
             optimizer.zero_grad()
             
@@ -228,9 +237,6 @@ def train_model(args):
         print(f"Resuming training from {args.checkpoint}")
         start_epoch = load_checkpoint(model, optimizer, scheduler, args.checkpoint)
         start_epoch += 1  # Start from the next epoch
-    
-    # Initialize AMP scaler if using mixed precision
-    scaler = torch.cuda.amp.GradScaler() if USE_AMP else None
     
     # Print training configuration
     print(f"Training configuration:")
