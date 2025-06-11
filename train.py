@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
+import numpy  # For direct access to numpy.dtype
 import logging
 import wandb
 from tqdm import tqdm
@@ -370,8 +371,8 @@ def main():
     checkpoint_path = Path(MODEL_DIR) / "checkpoint_latest.pth"
     if checkpoint_path.exists():
         logging.info(f"Loading checkpoint from {checkpoint_path}")
-        # Use context manager to temporarily allow the numpy global
-        with torch.serialization.safe_globals([np.core.multiarray.scalar]):
+        # Use context manager to temporarily allow the numpy globals
+        with torch.serialization.safe_globals([numpy.dtype, np.core.multiarray.scalar]):
             checkpoint = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])

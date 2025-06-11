@@ -234,6 +234,14 @@ class MLP(nn.Module):
                 
         self.layers = nn.ModuleList(layers)
         
+        # Special initialization for the final layer of the class embedding
+        # This helps prevent all predictions starting as background
+        if output_dim > 1:  # Likely the classification head
+            nn.init.constant_(self.layers[-1].bias.data, 0)
+            # Initialize the background class (last weight) with a small negative bias
+            if hasattr(self.layers[-1], 'bias') and self.layers[-1].bias is not None:
+                nn.init.constant_(self.layers[-1].bias[-1], -2.0)
+        
     def forward(self, x):
         for i, layer in enumerate(self.layers):
             x = layer(x)

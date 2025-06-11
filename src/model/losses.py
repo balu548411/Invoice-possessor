@@ -50,6 +50,11 @@ class HungarianMatcher(nn.Module):
         tgt_ids = torch.cat([t["labels"] for t in targets])
         tgt_bbox = torch.cat([t["boxes"] for t in targets])
         
+        # Handle empty targets case to avoid NaNs
+        if len(tgt_ids) == 0:
+            # Return empty assignments for each batch element
+            return [(torch.tensor([], dtype=torch.int64), torch.tensor([], dtype=torch.int64)) for _ in range(bs)]
+            
         # Compute classification cost
         # Out_prob is already after softmax, so get the probability for the correct class using gather
         cost_class = -out_prob[:, tgt_ids]
@@ -103,7 +108,9 @@ class SetCriterion(nn.Module):
         """Create empty_weight tensor on the correct device when needed"""
         if self.empty_weight is None or self.empty_weight.device != device:
             empty_weight = torch.ones(self.num_classes + 1, device=device)
-            empty_weight[-1] = self.eos_coef
+            # Use a slightly higher weight for the foreground classes to encourage detection 
+            empty_weight[:-1] = 1.5  # Higher weight for foreground classes
+            empty_weight[-1] = self.eos_coef  # Lower weight for background class
             self.empty_weight = empty_weight
         return self.empty_weight
     
@@ -126,6 +133,13 @@ class SetCriterion(nn.Module):
         
         # Extract matched indices
         idx = self._get_src_permutation_idx(indices)
+        
+        # Handle case where there are no matched boxes
+        if idx[0].shape[0] == 0:
+            # Just return a small constant loss to avoid NaN
+            loss_ce = torch.tensor(0.1, device=src_logits.device)
+            return {'loss_ce': loss_ce}
+            
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         target_classes = torch.full(src_logits.shape[:2], self.num_classes,
                                   dtype=torch.int64, device=src_logits.device)
@@ -155,18 +169,25 @@ class SetCriterion(nn.Module):
         assert 'pred_boxes' in outputs
         
         idx = self._get_src_permutation_idx(indices)
+        
+        # Handle case where there are no matched boxes
+        if idx[0].shape[0] == 0 or num_boxes == 0:
+            # Just return a small constant loss to avoid NaN
+            dummy_loss = torch.tensor(0.1, device=outputs['pred_boxes'].device)
+            return {'loss_bbox': dummy_loss, 'loss_giou': dummy_loss}
+            
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
-        losses = {'loss_bbox': loss_bbox.sum() / num_boxes}
+        losses = {'loss_bbox': loss_bbox.sum() / max(num_boxes, 1)}
         
         # GIoU loss
         giou_loss = 1 - torch.diag(generalized_box_iou(
             box_cxcywh_to_xyxy(src_boxes),
             box_cxcywh_to_xyxy(target_boxes)
         ))
-        losses['loss_giou'] = giou_loss.sum() / num_boxes
+        losses['loss_giou'] = giou_loss.sum() / max(num_boxes, 1)
         
         return losses
         
