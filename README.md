@@ -303,25 +303,63 @@ print(f"Test F1: {metrics['f1']:.3f}")
 
 ## 🐛 Troubleshooting
 
-### Common Issues
+### Common Issues and Solutions
 
-1. **CUDA Out of Memory**
-   ```bash
-   # Reduce batch size or enable gradient accumulation
-   python train_model.py --batch_size 4 --accumulate_grad_batches 8
+1. **DataLoader Shared Memory Error**
    ```
+   RuntimeError: DataLoader worker (pid(s) xxxx) exited unexpectedly
+   ```
+   **Solutions:**
+   - Run with disabled multiprocessing: `python train_model.py --disable_multiprocessing`
+   - Reduce workers: `python train_model.py --num_workers 2`
+   - Check shared memory: `python check_shared_memory.py`
+   - Increase shared memory: `sudo mount -o remount,size=4G /dev/shm`
 
-2. **Poor Entity Extraction**
-   ```bash
-   # Try different vision backbone or increase model size
-   python train_model.py --vision_model efficientnet_b5 --d_model 1024
+2. **DDP Unused Parameters Error**
    ```
+   RuntimeError: It looks like your LightningModule has parameters that were not used
+   ```
+   **Solution:** The code now automatically uses `DDPStrategy(find_unused_parameters=True)` when multiple GPUs are detected.
 
-3. **Slow Training**
-   ```bash
-   # Enable mixed precision and increase batch size
-   python train_model.py --precision 16-mixed --batch_size 16
-   ```
+3. **CUDA Out of Memory**
+   **Solutions:**
+   - Reduce batch size: `python train_model.py --batch_size 4`
+   - Use smaller model: `python train_model.py --vision_model efficientnet_b0 --d_model 256`
+   - Enable gradient accumulation: `python train_model.py --accumulate_grad_batches 8`
+
+4. **Import Errors**
+   **Solutions:**
+   - Install all dependencies: `pip install -r requirements.txt`
+   - Run validation: `python validate_setup.py`
+   - Check Python version (requires 3.8+)
+
+5. **Data Loading Issues**
+   **Solutions:**
+   - Verify data structure: Check that `training_data/images/` and `training_data/labels/` exist
+   - Test with sample data: `python test_training.py`
+   - Check JSON format matches Azure Form Recognizer output
+
+6. **Training Instability**
+   **Solutions:**
+   - Lower learning rate: `python train_model.py --learning_rate 1e-5`
+   - Adjust gradient clipping: Already set to 1.0 by default
+   - Use smaller model for testing: `python train_model.py --num_layers 2 --d_model 256`
+
+### Quick Diagnostic Commands
+
+```bash
+# Check system resources
+python check_shared_memory.py
+
+# Test training setup
+python test_training.py
+
+# Validate installation
+python validate_setup.py
+
+# Safe training start (minimal resources)
+python train_model.py --disable_multiprocessing --batch_size 2 --num_workers 0 --max_epochs 1
+```
 
 ## 🤝 Contributing
 

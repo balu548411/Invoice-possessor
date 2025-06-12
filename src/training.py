@@ -135,6 +135,9 @@ class InvoiceProcessingLightningModule(pl.LightningModule):
         for loss_name, loss_value in losses.items():
             self.log(f'train_{loss_name}', loss_value, prog_bar=True)
         
+        # Also log train_loss as an alias for train_total_loss for consistency
+        self.log('train_loss', losses['total_loss'], prog_bar=True)
+        
         # Store outputs for epoch end
         self.training_step_outputs.append({
             'loss': losses['total_loss'].detach(),
@@ -151,6 +154,9 @@ class InvoiceProcessingLightningModule(pl.LightningModule):
         # Log losses
         for loss_name, loss_value in losses.items():
             self.log(f'val_{loss_name}', loss_value, prog_bar=True)
+        
+        # Also log val_loss as an alias for val_total_loss for compatibility
+        self.log('val_loss', losses['total_loss'], prog_bar=True)
         
         # Store outputs for epoch end
         self.validation_step_outputs.append({
@@ -297,7 +303,7 @@ class InvoiceTrainer:
                 save_last=True
             ),
             EarlyStopping(
-                monitor='val_loss',
+                monitor='val_total_loss',
                 patience=10,
                 mode='min'
             ),
