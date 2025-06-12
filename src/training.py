@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score
 import logging
+import os
 
 from .model_architecture import InvoiceProcessingModel
 from .data_processing import create_data_loaders
@@ -296,11 +297,12 @@ class InvoiceTrainer:
         """Setup training callbacks"""
         callbacks = [
             ModelCheckpoint(
-                monitor='val_f1',
-                mode='max',
+                monitor='val_total_loss',
+                mode='min',
                 save_top_k=3,
-                filename='invoice-model-{epoch:02d}-{val_f1:.3f}',
-                save_last=True
+                filename='invoice-model-{epoch:02d}-{val_total_loss:.3f}',
+                save_last=True,
+                dirpath=os.path.join(self.config.get('output_dir', './outputs'), 'checkpoints')
             ),
             EarlyStopping(
                 monitor='val_total_loss',
