@@ -26,19 +26,43 @@ class NaNDetectionCallback(Callback):
         self.patience = patience
         
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if outputs is not None and torch.isnan(outputs):
-            self.nan_count += 1
-            logger.warning(f"NaN detected in training loss! Count: {self.nan_count}")
-            
-            if self.nan_count >= self.patience:
-                logger.error(f"Too many NaN losses ({self.nan_count}). Stopping training.")
-                trainer.should_stop = True
-        else:
-            self.nan_count = 0  # Reset counter if loss is valid
+        # Check if outputs is a dictionary containing loss information
+        if outputs is not None:
+            # For dictionaries returned from training_step (common in PTL)
+            if isinstance(outputs, dict) and 'loss' in outputs:
+                loss = outputs['loss']
+            # For direct tensor loss values (outputs may be the loss tensor directly)
+            elif isinstance(outputs, torch.Tensor):
+                loss = outputs
+            else:
+                # If structure is unknown, we can't check for NaN
+                return
+                
+            if torch.isnan(loss):
+                self.nan_count += 1
+                logger.warning(f"NaN detected in training loss! Count: {self.nan_count}")
+                
+                if self.nan_count >= self.patience:
+                    logger.error(f"Too many NaN losses ({self.nan_count}). Stopping training.")
+                    trainer.should_stop = True
+            else:
+                self.nan_count = 0  # Reset counter if loss is valid
             
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
-        if outputs is not None and torch.isnan(outputs):
-            logger.warning("NaN detected in validation loss!")
+        # Same check for validation outputs
+        if outputs is not None:
+            # For dictionaries returned from validation_step
+            if isinstance(outputs, dict) and 'loss' in outputs:
+                loss = outputs['loss']
+            # For direct tensor loss values
+            elif isinstance(outputs, torch.Tensor):
+                loss = outputs
+            else:
+                # If structure is unknown, we can't check for NaN
+                return
+                
+            if torch.isnan(loss):
+                logger.warning("NaN detected in validation loss!")
 
 
 class ImprovedEarlyStopping(EarlyStopping):
