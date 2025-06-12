@@ -87,7 +87,7 @@ class InvoiceDataset(Dataset):
     def _preprocess_image(self, image: Image.Image) -> torch.Tensor:
         """Preprocess an image for the model"""
         # Resize
-        
+        image = image.resize(self.image_size, Image.BILINEAR)
         
         # Convert to array
         image_array = np.array(image).astype(np.float32) / 255.0
