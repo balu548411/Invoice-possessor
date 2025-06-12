@@ -12,7 +12,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from src.data_processing import InvoiceDataProcessor
-from src.training import train_invoice_model
+# Use the fixed training module with NaN handling
+from src.training_fixes import create_fixed_trainer
 
 # Setup logging
 logging.basicConfig(
@@ -277,10 +278,14 @@ def main():
     # Create training configuration
     config = create_config(args)
     
-    # Train model
+    # Add stability parameters
+    config['gradient_clip_val'] = 1.0
+    config['label_smoothing'] = 0.1
+    
+    # Train model with fixed trainer
     try:
-        logger.info("Starting model training...")
-        model, trainer = train_invoice_model(train_df, val_df, config)
+        logger.info("Starting model training with NaN handling...")
+        model, trainer = create_fixed_trainer(train_df, val_df, config)
         
         logger.info("Training completed successfully!")
         logger.info(f"Best model saved to: {trainer.checkpoint_callback.best_model_path}")
