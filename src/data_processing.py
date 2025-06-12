@@ -340,6 +340,26 @@ def create_data_loaders(train_df: pd.DataFrame,
                        image_size: Tuple[int, int] = (512, 512)):
     """Create training and validation data loaders"""
     
+    # Check if we should use multiprocessing
+    import multiprocessing as mp
+    import psutil
+    
+    # Get available shared memory
+    try:
+        shm_stats = psutil.disk_usage('/dev/shm')
+        available_shm_gb = shm_stats.free / (1024**3)
+        
+        # If shared memory is low, reduce workers or disable multiprocessing
+        if available_shm_gb < 1.0:  # Less than 1GB
+            logger.warning(f"Low shared memory detected ({available_shm_gb:.2f}GB). Reducing workers.")
+            num_workers = min(num_workers, 2)
+        if available_shm_gb < 0.5:  # Less than 500MB
+            logger.warning("Very low shared memory. Disabling multiprocessing.")
+            num_workers = 0
+    except:
+        logger.warning("Could not check shared memory. Using conservative settings.")
+        num_workers = min(num_workers, 2)
+    
     train_dataset = InvoiceDataset(
         train_df, 
         transform=get_train_transforms(image_size),
@@ -352,24 +372,37 @@ def create_data_loaders(train_df: pd.DataFrame,
         image_size=image_size
     )
     
+    # DataLoader configuration to avoid shared memory issues
+    dataloader_kwargs = {
+        'batch_size': batch_size,
+        'pin_memory': True,
+        'collate_fn': collate_fn,
+        'persistent_workers': num_workers > 0,  # Keep workers alive between epochs
+        'prefetch_factor': 2 if num_workers > 0 else None,  # Reduce memory usage
+    }
+    
+    # Add multiprocessing settings only if using workers
+    if num_workers > 0:
+        dataloader_kwargs.update({
+            'num_workers': num_workers,
+            'multiprocessing_context': mp.get_context('spawn'),  # Use spawn instead of fork
+        })
+    else:
+        dataloader_kwargs['num_workers'] = 0
+    
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        collate_fn=collate_fn
+        **dataloader_kwargs
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True,
-        collate_fn=collate_fn
+        **dataloader_kwargs
     )
     
+    logger.info(f"Created DataLoaders with {num_workers} workers")
     return train_loader, val_loader
 
 

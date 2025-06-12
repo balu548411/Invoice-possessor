@@ -112,6 +112,11 @@ def parse_arguments():
         help="Number of data loader workers"
     )
     parser.add_argument(
+        "--disable_multiprocessing", 
+        action="store_true",
+        help="Disable DataLoader multiprocessing (sets num_workers=0)"
+    )
+    parser.add_argument(
         "--image_size", 
         type=int, 
         nargs=2, 
@@ -216,6 +221,9 @@ def process_data(images_dir: str, labels_dir: str, test_size: float, random_seed
 
 def create_config(args):
     """Create training configuration from arguments"""
+    # Handle multiprocessing settings
+    num_workers = 0 if args.disable_multiprocessing else args.num_workers
+    
     config = {
         # Model config
         'vision_model': args.vision_model,
@@ -229,7 +237,7 @@ def create_config(args):
         'learning_rate': args.learning_rate,
         'weight_decay': args.weight_decay,
         'max_epochs': args.max_epochs,
-        'num_workers': args.num_workers,
+        'num_workers': num_workers,
         'image_size': tuple(args.image_size),
         'precision': args.precision,
         'accumulate_grad_batches': args.accumulate_grad_batches,
