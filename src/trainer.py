@@ -103,6 +103,10 @@ class InvoiceModelTrainer:
             attention_mask = batch['attention_mask'].to(self.device)
             boxes = batch['boxes'].to(self.device)
             
+            # Get key_fields and text from batch for supervision
+            key_fields = batch['key_fields']
+            text_values = batch['text']
+            
             # Compute attention mask for tokens
             # 1 for padding (to be ignored), 0 for valid tokens
             token_mask = attention_mask.eq(0)
@@ -114,32 +118,53 @@ class InvoiceModelTrainer:
                 # Calculate losses
                 batch_loss = 0.0
                 
-                # Simplified training loss - in a real implementation, we would extract
-                # ground truth labels from the key_fields for each field
-                # For now, we'll just use a dummy focal loss for demonstration
                 doc_features = outputs['doc_features']
                 word_features = outputs['word_features']
                 field_preds = outputs['field_predictions']
                 
-                # Placeholder for field extraction supervision
-                # This would be replaced with the actual field labels in a real implementation
-                
-                # Calculate loss for each field
+                # Create targets for field extraction based on actual key_fields
                 for field_name, field_data in field_preds.items():
-                    # Dummy targets for demonstration - in reality, these would come from annotations
-                    # We're just creating random targets here
                     batch_size = images.size(0)
-                    dummy_indices = torch.randint(0, word_features.size(1), (batch_size,)).to(self.device)
-                    dummy_targets = torch.zeros(batch_size, word_features.size(1)).to(self.device)
+                    seq_length = word_features.size(1)
                     
-                    # Create one-hot targets
-                    for i, idx in enumerate(dummy_indices):
-                        dummy_targets[i, idx] = 1.0
+                    # Initialize targets (all zeros)
+                    field_targets = torch.zeros(batch_size, seq_length).to(self.device)
+                    
+                    # For each item in the batch
+                    for i in range(batch_size):
+                        item_text_values = text_values[i]
+                        item_key_fields = key_fields[i]
+                        
+                        # If this field exists in the key_fields
+                        if field_name in item_key_fields and item_key_fields[field_name]:
+                            field_value = str(item_key_fields[field_name])
+                            
+                            # Find the best matching text in the OCR results
+                            best_match_idx = -1
+                            best_match_score = 0
+                            
+                            for j, text in enumerate(item_text_values):
+                                if field_value.lower() in text.lower() or text.lower() in field_value.lower():
+                                    # Simple matching heuristic - can be improved
+                                    overlap = len(set(field_value.lower().split()) & set(text.lower().split()))
+                                    if overlap > best_match_score:
+                                        best_match_score = overlap
+                                        best_match_idx = j
+                            
+                            # If found, set the target
+                            if best_match_idx >= 0 and best_match_idx < seq_length:
+                                field_targets[i, best_match_idx] = 1.0
+                    
+                    # Get confidences from the model
+                    # Create dummy scores with proper gradient connection
+                    # This ensures we properly use the existing field_data['confidence'] tensor
+                    field_confidences = torch.zeros_like(field_targets, requires_grad=True)
+                    for i in range(batch_size):
+                        for j in range(seq_length):
+                            field_confidences[i, j] = field_data['confidence'][i] if j == field_data['indices'][i] else 0.0
                     
                     # Calculate field confidence loss
-                    # Generate dummy confidence scores with requires_grad=True
-                    dummy_scores = torch.randn(batch_size, word_features.size(1), device=self.device, requires_grad=True)
-                    field_loss = self.field_confidence_loss(dummy_scores, dummy_targets)
+                    field_loss = self.field_confidence_loss(field_confidences, field_targets)
                     
                     # Add to total loss
                     batch_loss += field_loss
@@ -152,11 +177,6 @@ class InvoiceModelTrainer:
             # Backpropagate and optimize
             if is_training:
                 self.optimizer.zero_grad()
-                # Make sure batch_loss requires grad
-                if not batch_loss.requires_grad:
-                    # Create a dummy tensor that requires grad and add it to batch_loss
-                    dummy_tensor = torch.tensor(1.0, device=self.device, requires_grad=True)
-                    batch_loss = batch_loss + 0.0 * dummy_tensor
                 batch_loss.backward()
                 self.optimizer.step()
             

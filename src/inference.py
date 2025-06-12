@@ -93,29 +93,64 @@ class InvoiceProcessor:
         """
         Perform OCR on an image to extract text and bounding boxes
         
-        In a real implementation, this would use Tesseract, EasyOCR, or a cloud OCR service
-        For this example, we'll simulate OCR results
+        Uses doctr OCR to extract text and bounding boxes from the image
         """
-        # For demonstration - in a real scenario, implement OCR using Tesseract or other OCR engine
-        # Simulate OCR results with dummy data
-        texts = [
-            "Invoice #12345",
-            "Date: 06/15/2023",
-            "Total: $1,234.56",
-            "Vendor: ABC Company",
-            "Customer: XYZ Corp"
-        ]
+        from doctr.models import ocr_predictor
+        from doctr.io import Document
         
-        # Create dummy bounding boxes (normalized)
+        # Get image dimensions
         h, w = image.shape[:2]
-        boxes = [
-            [0.1, 0.1, 0.4, 0.05],  # Invoice number
-            [0.1, 0.2, 0.3, 0.05],  # Date
-            [0.7, 0.8, 0.2, 0.05],  # Total
-            [0.1, 0.3, 0.4, 0.05],  # Vendor
-            [0.1, 0.4, 0.4, 0.05]   # Customer
-        ]
         
+        # Initialize doctr model (uses pretrained models)
+        # Use a lightweight model for speed, can change to 'db_resnet50' for higher accuracy
+        model = ocr_predictor(pretrained=True)
+        
+        # Prepare the image and run inference
+        # doctr expects RGB images
+        if len(image.shape) == 2:  # Grayscale
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif image.shape[2] == 4:  # RGBA
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+        else:
+            image_rgb = image
+            
+        # Create a doctr Document from the image
+        doc = Document.from_images([image_rgb])
+        
+        # Run inference
+        result = model(doc)
+        
+        # Extract text and boxes
+        texts = []
+        boxes = []
+        
+        # Process predictions
+        for page in result.pages:
+            for block in page.blocks:
+                for line in block.lines:
+                    for word in line.words:
+                        # Get text
+                        text = word.value
+                        
+                        # Get bounding box coordinates (doctr returns boxes as relative coordinates)
+                        # Format is [[x1, y1], [x2, y1], [x2, y2], [x1, y2]] 
+                        rel_coords = word.geometry
+                        
+                        # Convert to [x, y, width, height] format
+                        x = rel_coords[0][0]
+                        y = rel_coords[0][1]
+                        width = rel_coords[1][0] - rel_coords[0][0]
+                        height = rel_coords[2][1] - rel_coords[1][1]
+                        
+                        # Add to results
+                        texts.append(text)
+                        boxes.append([x, y, width, height])
+        
+        # If no text was found, add a default empty box
+        if not texts:
+            texts = ["No text detected"]
+            boxes = [[0.1, 0.1, 0.8, 0.1]]  # Default box in the middle
+            
         return texts, boxes
     
     def _tokenize_text(self, texts: List[str]) -> Dict:
