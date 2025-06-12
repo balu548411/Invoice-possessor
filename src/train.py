@@ -170,6 +170,10 @@ def main():
     # Set random seed
     set_seed(args.seed)
     
+    # Set default tensor type to float32
+    torch.set_default_tensor_type(torch.FloatTensor)
+    torch.set_default_dtype(torch.float32)
+    
     # Create output directories
     os.makedirs(args.processed_dir, exist_ok=True)
     os.makedirs(args.checkpoints_dir, exist_ok=True)

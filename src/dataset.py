@@ -93,12 +93,12 @@ class InvoiceDataset(Dataset):
         image_array = np.array(image).astype(np.float32) / 255.0
         
         # Normalize with ImageNet stats
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
         image_array = (image_array - mean) / std
         
         # Convert to tensor [C, H, W]
-        image_tensor = torch.from_numpy(image_array).permute(2, 0, 1)
+        image_tensor = torch.from_numpy(image_array).permute(2, 0, 1).float()  # Explicitly cast to float32
         
         return image_tensor
     
@@ -215,10 +215,10 @@ class InvoiceDataset(Dataset):
         def collate_fn(batch):
             """Custom collate function to handle variable-length data"""
             # Extract batch elements
-            images = torch.stack([item['image'] for item in batch])
+            images = torch.stack([item['image'] for item in batch]).float()  # Ensure float32
             tokens = torch.stack([item['tokens'] for item in batch])
             attention_masks = torch.stack([item['attention_mask'] for item in batch])
-            boxes = torch.from_numpy(np.stack([item['boxes'] for item in batch]))
+            boxes = torch.from_numpy(np.stack([item['boxes'] for item in batch])).float()  # Ensure float32
             image_ids = [item['image_id'] for item in batch]
             texts = [item['text'] for item in batch]
             key_fields = [item['key_fields'] for item in batch]

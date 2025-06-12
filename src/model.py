@@ -51,6 +51,9 @@ class LayoutPositionalEncoding(nn.Module):
         Returns:
             Position encodings
         """
+        # Ensure boxes are float32
+        boxes = boxes.float()
+        
         # Split into components
         x_min = boxes[:, :, 0:1]
         y_min = boxes[:, :, 1:2]
@@ -90,6 +93,9 @@ class InvoiceVisionModel(nn.Module):
         Returns:
             Visual features
         """
+        # Ensure images are float32
+        images = images.float()
+        
         # Get features from backbone
         features = self.backbone.forward_features(images)  # [B, num_patches, embed_dim]
         
@@ -135,6 +141,11 @@ class KeyFieldExtractor(nn.Module):
         Returns:
             Dictionary of predicted field values and locations
         """
+        # Ensure all inputs are float32
+        features = features.float()
+        word_features = word_features.float()
+        boxes = boxes.float()
+        
         batch_size, num_words, _ = word_features.shape
         
         # Process document features
@@ -215,6 +226,10 @@ class InvoiceProcessorModel(nn.Module):
         Returns:
             Dictionary of extracted fields with values and confidence scores
         """
+        # Ensure inputs have the correct data type
+        images = images.float()
+        boxes = boxes.float()
+        
         # Get visual features
         visual_features = self.vision_model(images)
         
