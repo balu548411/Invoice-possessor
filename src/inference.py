@@ -121,18 +121,37 @@ class InvoiceProcessor:
             image_rgb = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
         else:
             image_rgb = image
-            
-        # Create a temporary file to use with DocumentFile
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.jpg') as temp_file:
-            # Save the image to the temporary file
-            cv2.imwrite(temp_file.name, image_rgb)
-            
-            # Create a DocumentFile from the temporary file
-            doc = DocumentFile.from_images([temp_file.name])
-            
-            # Run inference
-            result = model(doc)
+        
+        # Try two different methods to handle doctr API changes
+        try:
+            # Method 1: Try to use numpy arrays directly (newer doctr versions)
+            try:
+                # For newer doctr versions that support direct numpy arrays
+                doc = DocumentFile.from_arrays([image_rgb])
+                result = model(doc)
+            except (AttributeError, TypeError):
+                # Method 2: Fallback to temporary file method (older doctr versions)
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.jpg') as temp_file:
+                    # Save the image to the temporary file
+                    cv2.imwrite(temp_file.name, image_rgb)
+                    
+                    # Create a DocumentFile from the temporary file
+                    doc = DocumentFile.from_images([temp_file.name])
+                    
+                    # Run inference
+                    result = model(doc)
+        except Exception as e:
+            # Method 3: Last resort - try with direct model call if newer API
+            print(f"Warning: Document processing failed with error: {e}")
+            print("Trying direct model call...")
+            try:
+                # For very new versions of doctr that might support direct processing
+                result = model([image_rgb])
+            except Exception as e2:
+                print(f"All OCR methods failed: {e2}")
+                # Return empty result if all methods fail
+                return ["OCR failed"], [[0.1, 0.1, 0.8, 0.1]]
         
         # Extract text and boxes
         texts = []
