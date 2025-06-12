@@ -137,6 +137,9 @@ class KeyFieldExtractor(nn.Module):
         # Word feature projector for attention 
         self.word_projector = nn.Linear(input_dim, hidden_dim)
         
+        # Position embedding projector (moved from forward pass)
+        self.pos_projector = nn.Linear(4, hidden_dim)
+        
         # Field-specific attention and extraction heads
         self.field_attentions = nn.ModuleDict()
         self.field_extractors = nn.ModuleDict()
@@ -155,7 +158,7 @@ class KeyFieldExtractor(nn.Module):
                 nn.Linear(hidden_dim * 2, hidden_dim),  # Concat doc + attended word features
                 nn.LayerNorm(hidden_dim),
                 nn.ReLU(),
-                nn.Dropout(0.3),
+                nn.Dropout(0.2),  # Reduced dropout to avoid overfitting
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.LayerNorm(hidden_dim // 2),
                 nn.ReLU(),
@@ -180,7 +183,7 @@ class KeyFieldExtractor(nn.Module):
                 nn.Linear(hidden_dim * 2, hidden_dim), 
                 nn.LayerNorm(hidden_dim),
                 nn.ReLU(),
-                nn.Dropout(0.3),
+                nn.Dropout(0.2),  # Reduced dropout to match __init__
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.LayerNorm(hidden_dim // 2),
                 nn.ReLU(),
@@ -222,12 +225,11 @@ class KeyFieldExtractor(nn.Module):
             torch.cos(box_centers * 10)
         ], dim=2)  # [batch_size, num_words, 4]
         
-        # Project position to hidden_dim (simple linear projection)
-        pos_proj = nn.Linear(4, word_encoding.size(2), device=features.device)
-        pos_features = pos_proj(pos_embedding)  # [batch_size, num_words, hidden_dim]
+        # Project position using pre-initialized layer
+        pos_features = self.pos_projector(pos_embedding)  # [batch_size, num_words, hidden_dim]
         
         # Add position features to word encoding
-        word_encoding = word_encoding + pos_features  # [batch_size, num_words, hidden_dim]
+        word_encoding = word_encoding + 0.1 * pos_features  # Scale down position influence
         
         # For each field, predict which text element contains the value
         results = {}
@@ -237,9 +239,15 @@ class KeyFieldExtractor(nn.Module):
             doc_expanded = doc_encoding.unsqueeze(1)  # [batch_size, 1, hidden_dim]
             
             # Compute field-specific attention
-            # Attention scores based on compatibility between doc features and word features
-            compatibility = word_encoding * doc_expanded  # Element-wise mult for compatibility
+            # Modified to use addition instead of multiplication for more stable gradients
+            compatibility = torch.tanh(word_encoding + doc_expanded)  # Addition works better than multiplication
             attn_logits = self.field_attentions[field](compatibility)  # [batch_size, num_words, 1]
+            
+            # Apply temperature scaling for more stable training (prevents overfitting)
+            temperature = 2.0
+            attn_logits = attn_logits / temperature
+            
+            # Apply softmax attention 
             attn_scores = torch.softmax(attn_logits.squeeze(-1), dim=1)  # [batch_size, num_words]
             
             # Get field-specific weighted representation of words
@@ -397,7 +405,7 @@ class InvoiceProcessorModel(nn.Module):
                 confidence = field_data['confidence'][b].item()
                 
                 # Only include predictions with reasonable confidence
-                if confidence > 0.5 and index < len(ocr_texts[b]):
+                if confidence > -0.5 and index < len(ocr_texts[b]):  # Lowered threshold to catch more predictions
                     sample_results[field_name] = {
                         'text': ocr_texts[b][index],
                         'confidence': confidence
