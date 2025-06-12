@@ -270,7 +270,8 @@ class InvoiceTrainer:
             'accumulate_grad_batches': 4,
             'gradient_clip_val': 1.0,
             'project_name': 'invoice-processing',
-            'experiment_name': 'multimodal-v1'
+            'experiment_name': 'multimodal-v1',
+            'output_dir': './outputs'
         }
         
         if config:
@@ -328,6 +329,14 @@ class InvoiceTrainer:
         callbacks = self.setup_callbacks()
         
         # Create trainer
+        # Determine strategy based on available devices
+        import torch
+        if torch.cuda.device_count() > 1:
+            from pytorch_lightning.strategies import DDPStrategy
+            strategy = DDPStrategy(find_unused_parameters=True)
+        else:
+            strategy = 'auto'
+        
         trainer = pl.Trainer(
             max_epochs=self.config['max_epochs'],
             precision=self.config['precision'],
@@ -337,7 +346,7 @@ class InvoiceTrainer:
             callbacks=callbacks,
             accelerator='auto',
             devices='auto',
-            strategy='auto'
+            strategy=strategy
         )
         
         # Train model
@@ -368,6 +377,14 @@ class InvoiceTrainer:
         callbacks = self.setup_callbacks()
         
         # Create trainer
+        # Determine strategy based on available devices
+        import torch
+        if torch.cuda.device_count() > 1:
+            from pytorch_lightning.strategies import DDPStrategy
+            strategy = DDPStrategy(find_unused_parameters=True)
+        else:
+            strategy = 'auto'
+        
         trainer = pl.Trainer(
             max_epochs=self.config['max_epochs'],
             precision=self.config['precision'],
@@ -377,7 +394,7 @@ class InvoiceTrainer:
             callbacks=callbacks,
             accelerator='auto',
             devices='auto',
-            strategy='auto'
+            strategy=strategy
         )
         
         # Resume training
