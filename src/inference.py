@@ -6,8 +6,19 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 import cv2
+import warnings
 from transformers import AutoTokenizer
 from typing import Dict, List, Tuple, Optional, Any
+
+# Import doctr first to configure TensorFlow environment
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warning, 3=error
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR')
+
+# Import doctr components at the top level
+from doctr.io import DocumentFile
+from doctr.models import ocr_predictor
 
 from model import create_invoice_model
 
@@ -95,9 +106,6 @@ class InvoiceProcessor:
         
         Uses doctr OCR to extract text and bounding boxes from the image
         """
-        from doctr.models import ocr_predictor
-        from doctr.io import Document
-        
         # Get image dimensions
         h, w = image.shape[:2]
         
@@ -114,11 +122,17 @@ class InvoiceProcessor:
         else:
             image_rgb = image
             
-        # Create a doctr Document from the image
-        doc = Document.from_images([image_rgb])
-        
-        # Run inference
-        result = model(doc)
+        # Create a temporary file to use with DocumentFile
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.jpg') as temp_file:
+            # Save the image to the temporary file
+            cv2.imwrite(temp_file.name, image_rgb)
+            
+            # Create a DocumentFile from the temporary file
+            doc = DocumentFile.from_images([temp_file.name])
+            
+            # Run inference
+            result = model(doc)
         
         # Extract text and boxes
         texts = []
