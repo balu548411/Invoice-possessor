@@ -328,6 +328,11 @@ class InvoiceTrainer:
         
         # Create model
         model = InvoiceProcessingLightningModule(
+            vision_model=self.config.get('vision_model', 'efficientnet_b3'),
+            text_model=self.config.get('text_model', 'microsoft/layoutlm-base-uncased'),
+            d_model=self.config.get('d_model', 768),
+            num_layers=self.config.get('num_layers', 6),
+            num_heads=self.config.get('num_heads', 12),
             learning_rate=self.config['learning_rate'],
             weight_decay=self.config['weight_decay']
         )

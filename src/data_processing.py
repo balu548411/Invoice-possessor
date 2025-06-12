@@ -280,11 +280,39 @@ class InvoiceDataset(Dataset):
         
         # Load image
         image = cv2.imread(row['image_path'])
+        if image is None:
+            logger.error(f"Failed to load image: {row['image_path']}")
+            # Return a dummy sample
+            return {
+                'image': torch.zeros(3, self.image_size[0], self.image_size[1]),
+                'boxes': torch.zeros(self.max_boxes, 4, dtype=torch.float32),
+                'labels': torch.zeros(self.max_boxes, dtype=torch.long),
+                'entities': row.get('entities', {}),
+                'image_path': row['image_path'],
+                'texts': [''] * self.max_boxes,
+                'words': [[''] * self.max_boxes]
+            }
+        
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
         # Get bounding boxes and labels
         boxes = row['bboxes']['boxes']
         labels = row['bboxes']['labels']
+        
+        # Get text content for each box
+        entities = row.get('entities', {})
+        all_text = entities.get('all_text', [])
+        
+        # Extract texts and words
+        texts = []
+        words = []
+        for i, box in enumerate(boxes[:self.max_boxes]):
+            if i < len(all_text):
+                texts.append(all_text[i].get('text', ''))
+                words.append(all_text[i].get('text', '').split())
+            else:
+                texts.append('')
+                words.append([''])
         
         # Pad or truncate boxes to max_boxes
         if len(boxes) > self.max_boxes:
@@ -295,6 +323,8 @@ class InvoiceDataset(Dataset):
             pad_length = self.max_boxes - len(boxes)
             boxes.extend([[0, 0, 0, 0]] * pad_length)
             labels.extend([0] * pad_length)
+            texts.extend([''] * pad_length)
+            words.extend([[''] * pad_length])
         
         # Apply transforms
         if self.transform:
@@ -305,8 +335,10 @@ class InvoiceDataset(Dataset):
             'image': image,
             'boxes': torch.tensor(boxes, dtype=torch.float32),
             'labels': torch.tensor(labels, dtype=torch.long),
-            'entities': row['entities'],
-            'image_path': row['image_path']
+            'entities': entities,
+            'image_path': row['image_path'],
+            'texts': texts,
+            'words': words
         }
 
 
@@ -413,11 +445,15 @@ def collate_fn(batch):
     labels = torch.stack([item['labels'] for item in batch])
     entities = [item['entities'] for item in batch]
     image_paths = [item['image_path'] for item in batch]
+    texts = [item['texts'] for item in batch]
+    words = [item['words'] for item in batch]
     
     return {
         'images': images,
         'boxes': boxes,
         'labels': labels,
         'entities': entities,
-        'image_paths': image_paths
+        'image_paths': image_paths,
+        'texts': texts,
+        'words': words
     } 
