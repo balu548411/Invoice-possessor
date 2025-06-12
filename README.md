@@ -1,148 +1,123 @@
-# Invoice Processor Model
+# Invoice Processor - Deep Learning Model
 
-A deep learning model for automated invoice processing that extracts structured data from invoice images and PDFs, similar to Azure's Form Recognizer for invoices.
+This project implements a deep learning model for invoice processing, similar to Azure's pre-trained invoice model. It can extract key fields from invoice images and PDFs, such as invoice numbers, dates, amounts, and vendor information.
 
-## Features
+## Architecture
 
-- Processes invoice images (JPG, PNG) and PDFs
-- Extracts key invoice fields such as:
-  - Invoice number
-  - Date
-  - Due date
-  - Total amount
-  - Vendor name
-  - Customer name
-  - Tax amount
-  - Subtotal
-  - Payment terms
-  - Description
-- Uses a hybrid architecture combining:
-  - CNN (EfficientNetB3) for visual feature extraction
-  - BERT for text understanding 
-  - Multi-head output for field extraction
+The model uses a hybrid architecture:
+
+- **Vision Component**: Vision Transformer (ViT) for visual understanding of the document layout
+- **Text Component**: Transformer-based text encoder for processing OCR text
+- **Layout Understanding**: Special positional encoding for 2D layout information
+- **Multimodal Fusion**: Fusion transformer to combine visual and textual features
+- **Field Extraction**: Specialized heads for extracting specific invoice fields
 
 ## Project Structure
 
-```
-.
-├── training_data/       # Training dataset
-│   ├── images/          # Invoice images
-│   └── labels/          # JSON label files
-├── src/                 # Source code
-│   ├── data_processor.py  # Data processing utilities
-│   ├── model.py         # Model architecture
-│   ├── train.py         # Training script
-│   └── inference.py     # Inference script
-├── models/              # Saved model checkpoints
-├── logs/                # Training logs
-└── inference_results/   # Results from inference
-```
+- `src/`: Source code directory
+  - `data_processor.py`: Invoice data processing utilities
+  - `dataset.py`: PyTorch dataset for loading and batching invoice data
+  - `model.py`: PyTorch model definition
+  - `trainer.py`: Training and evaluation routines
+  - `train.py`: Main script for training the model
+  - `inference.py`: Script for performing inference with the trained model
+- `training_data/`: Directory containing training data
+  - `images/`: Invoice images
+  - `labels/`: JSON annotation files
+- `processed_data/`: Directory for processed data (created during training)
+- `checkpoints/`: Directory for model checkpoints (created during training)
 
-## Requirements
+## Setup
 
-Install the required packages:
-
+1. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-The model requires:
-- TensorFlow 2.x
-- OpenCV
-- pytesseract
-- pdf2image
-- transformers
-- Other utilities like numpy, matplotlib, etc.
+2. Make sure you have Tesseract OCR installed (for OCR capability):
+```bash
+# For Ubuntu
+sudo apt-get install tesseract-ocr
+
+# For macOS
+brew install tesseract
+```
+
+## Data Format
+
+The training data consists of invoice images and corresponding JSON annotation files. The JSON files should have the following structure:
+
+```json
+{
+  "pages": [
+    {
+      "page_number": 1,
+      "width": 1224.0,
+      "height": 1584.0,
+      "lines": [
+        {
+          "content": "Invoice #12345",
+          "polygon": [
+            {"x": 86.0, "y": 76.0}, 
+            {"x": 296.0, "y": 77.0}, 
+            {"x": 296.0, "y": 103.0}, 
+            {"x": 86.0, "y": 102.0}
+          ]
+        },
+        // More lines...
+      ],
+      // Other page info...
+    }
+  ]
+}
+```
 
 ## Usage
 
-### Training the Model
-
-To train the model on your invoice dataset:
+### 1. Process Data and Train the Model
 
 ```bash
-python src/train.py \
-  --image_dir training_data/images \
-  --label_dir training_data/labels \
-  --epochs 20 \
-  --batch_size 8
+python src/train.py --images_dir training_data/images --labels_dir training_data/labels
 ```
 
-Parameters:
-- `--image_dir`: Directory containing invoice images
-- `--label_dir`: Directory containing corresponding JSON labels
-- `--model_dir`: Directory to save the trained model (default: '../models')
-- `--log_dir`: Directory to save logs and plots (default: '../logs')
-- `--img_height`: Image height for model input (default: 800)
-- `--img_width`: Image width for model input (default: 800)
-- `--epochs`: Number of training epochs (default: 20)
-- `--batch_size`: Training batch size (default: 8)
+Additional training options:
+```bash
+python src/train.py --images_dir training_data/images \
+                    --labels_dir training_data/labels \
+                    --batch_size 16 \
+                    --epochs 30 \
+                    --learning_rate 1e-4 \
+                    --image_size 384
+```
 
-### Running Inference
-
-To extract information from new invoices using the trained model:
+### 2. Process Invoices with the Trained Model
 
 ```bash
-python src/inference.py \
-  --input_path /path/to/invoice.pdf \
-  --model_path models/final_model.h5
+python src/inference.py --model_path checkpoints/best_model_epoch_10.pth \
+                       --document_path your_invoice.jpg \
+                       --output_path results.json
 ```
 
-Or for processing a directory of invoices:
+## Customization
 
-```bash
-python src/inference.py \
-  --input_path /path/to/invoice_directory \
-  --model_path models/final_model.h5
-```
+You can customize the model architecture in `model.py` and training parameters in `train.py`.
 
-Parameters:
-- `--input_path`: Path to input file or directory containing files
-- `--output_dir`: Directory to save output JSON files (default: '../inference_results')
-- `--model_path`: Path to trained model weights (default: '../models/final_model.h5')
+## Performance
 
-## Model Architecture
+The model's performance depends significantly on training data quality and quantity. For best results:
 
-The model uses a hybrid architecture:
+1. Use a diverse set of invoice images
+2. Ensure accurate annotations, especially for key fields
+3. Tune hyperparameters like learning rate, batch size, and image resolution
 
-1. **Image Processing Branch**:
-   - EfficientNetB3 as the backbone for feature extraction
-   - Global average pooling to get fixed-size feature vectors
-   - Dense layers for feature transformation
+## Extending the Model
 
-2. **Text Processing Branch**:
-   - BERT for understanding the textual content of invoices
-   - Uses the CLS token output as document representation
+To extract additional fields or support more document types:
 
-3. **Multi-head Output**:
-   - Separate prediction heads for each invoice field
-   - Character-level sequence prediction for flexibility
-
-## Dataset Format
-
-The training data consists of:
-
-1. **Images**: Invoice images in JPG/PNG format
-2. **Labels**: JSON files with field annotations including:
-   - Document text content
-   - Word bounding boxes
-   - Field values
-
-## Performance Optimization
-
-- Model weights are saved at checkpoints during training
-- Early stopping to prevent overfitting
-- Learning rate scheduling for better convergence
-- Appropriate batch size for memory efficiency
-
-## Future Improvements
-
-- Add table extraction capabilities for line items
-- Implement more sophisticated field extraction using NER
-- Support for multiple languages
-- Attention visualization for better explainability
-- Fine-tuning with domain-specific invoice types
+1. Update the `extract_key_fields` method in `data_processor.py`
+2. Modify the field extractor in `model.py`
+3. Add new field types to the training and evaluation routines
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is provided for educational and research purposes only.

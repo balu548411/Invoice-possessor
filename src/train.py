@@ -1,147 +1,185 @@
 import os
 import argparse
-import tensorflow as tf
+import torch
 import numpy as np
-import matplotlib.pyplot as plt
+import random
 from pathlib import Path
-import json
-from tqdm import tqdm
-import time
+from typing import Dict, List, Tuple, Any
 
-# Import our modules
 from data_processor import InvoiceDataProcessor
-from model import InvoiceProcessor
+from dataset import InvoiceDataset
+from model import create_invoice_model
+from trainer import InvoiceModelTrainer
 
-def main(args):
-    # Create directories for outputs
-    os.makedirs(args.model_dir, exist_ok=True)
-    os.makedirs(args.log_dir, exist_ok=True)
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
+def set_seed(seed: int = 42):
+    """Set random seeds for reproducibility"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+def process_data(args):
+    """Process and prepare data for training"""
+    print("Processing invoice data...")
     
-    # Initialize data processor
-    print("Initializing data processor...")
-    data_processor = InvoiceDataProcessor(
-        image_dir=args.image_dir,
-        label_dir=args.label_dir,
-        img_size=(args.img_height, args.img_width)
+    processor = InvoiceDataProcessor(
+        images_dir=args.images_dir,
+        labels_dir=args.labels_dir,
+        output_size=(args.image_size, args.image_size),
+        max_examples=args.max_examples
     )
+    
+    # Process and save dataset
+    output_path = processor.save_processed_dataset(args.processed_dir)
+    
+    print(f"Data processing complete. Processed data saved to {output_path}")
+    
+    return output_path
+
+def train_model(args):
+    """Train the model on processed data"""
+    print("Starting model training...")
+    
+    # Paths
+    processed_dir = Path(args.processed_dir)
+    annotations_path = processed_dir / "annotations.json"
+    images_dir = processed_dir / "processed_images"
+    
+    # Check if processed data exists
+    if not annotations_path.exists() or not images_dir.exists():
+        raise ValueError(f"Processed data not found at {processed_dir}")
     
     # Create dataset
-    print("Creating dataset...")
-    (train_images, train_labels), (val_images, val_labels), matched_files = data_processor.create_dataset(
-        split_ratio=args.train_split
+    full_dataset = InvoiceDataset(
+        annotations_file=str(annotations_path),
+        images_dir=str(images_dir),
+        tokenizer_name=args.tokenizer_name,
+        max_seq_len=args.max_seq_len,
+        image_size=(args.image_size, args.image_size),
+        training=True
     )
     
-    # Save matched files for reference
-    with open(os.path.join(args.log_dir, 'matched_files.json'), 'w') as f:
-        json.dump(matched_files, f, indent=2)
+    # Split dataset
+    dataset_size = len(full_dataset)
+    train_size = int(dataset_size * args.train_ratio)
+    val_size = dataset_size - train_size
     
-    # Extract text from labels for the text branch
-    print("Preparing text data...")
-    train_text = [label.get('document_text', '') for label in train_labels]
-    val_text = [label.get('document_text', '') for label in val_labels]
-    
-    # Initialize model
-    print("Building model...")
-    model = InvoiceProcessor(
-        img_size=(args.img_height, args.img_width),
-        max_text_length=args.max_text_length,
-        num_fields=args.num_fields
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(args.seed)
     )
     
-    # Create directory for checkpoints
-    os.makedirs('model_checkpoints', exist_ok=True)
+    print(f"Dataset split: {train_size} training samples, {val_size} validation samples")
+    
+    # Create dataloaders
+    train_dataloader = InvoiceDataset.create_dataloader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers
+    )
+    
+    val_dataloader = InvoiceDataset.create_dataloader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers
+    )
+    
+    # Create model
+    model = create_invoice_model(
+        pretrained=True,
+        vocab_size=args.vocab_size,
+        max_seq_len=args.max_seq_len,
+        embed_dim=args.embed_dim
+    )
+    
+    # Create trainer
+    trainer = InvoiceModelTrainer(
+        model=model,
+        train_dataloader=train_dataloader,
+        val_dataloader=val_dataloader,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        checkpoints_dir=args.checkpoints_dir
+    )
     
     # Train model
-    print(f"Starting training for {args.epochs} epochs...")
-    start_time = time.time()
-    
-    history = model.train(
-        train_images=train_images,
-        train_text=train_text,
-        val_images=val_images,
-        val_text=val_text,
-        train_labels=train_labels,
-        val_labels=val_labels,
-        epochs=args.epochs,
-        batch_size=args.batch_size
+    history = trainer.train(
+        num_epochs=args.epochs,
+        early_stopping_patience=args.patience
     )
     
-    training_time = time.time() - start_time
-    print(f"Training completed in {training_time:.2f} seconds")
+    print(f"Training complete. Best model saved at: {args.checkpoints_dir}")
     
-    # Save final model
-    model.save_model(os.path.join(args.model_dir, 'final_model.h5'))
-    
-    # Plot training history
-    plt.figure(figsize=(12, 4))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(history.history['loss'])
-    plt.plot(history.history['val_loss'])
-    plt.title('Model Loss')
-    plt.ylabel('Loss')
-    plt.xlabel('Epoch')
-    plt.legend(['Train', 'Validation'], loc='upper right')
-    
-    # Plot overall accuracy (average of field accuracies)
-    accuracies = []
-    val_accuracies = []
-    
-    for field in history.history:
-        if field.endswith('accuracy') and not field.startswith('val_'):
-            accuracies.append(history.history[field])
-        elif field.endswith('accuracy') and field.startswith('val_'):
-            val_accuracies.append(history.history[field])
-    
-    if accuracies:
-        avg_acc = np.mean(np.array(accuracies), axis=0)
-        avg_val_acc = np.mean(np.array(val_accuracies), axis=0)
-        
-        plt.subplot(1, 2, 2)
-        plt.plot(avg_acc)
-        plt.plot(avg_val_acc)
-        plt.title('Average Accuracy')
-        plt.ylabel('Accuracy')
-        plt.xlabel('Epoch')
-        plt.legend(['Train', 'Validation'], loc='lower right')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.log_dir, 'training_history.png'))
-    
-    # Save training history
-    with open(os.path.join(args.log_dir, 'training_history.json'), 'w') as f:
-        json.dump(history.history, f, indent=2)
-    
-    print(f"Model saved to {os.path.join(args.model_dir, 'final_model.h5')}")
-    print(f"Training history saved to {os.path.join(args.log_dir, 'training_history.json')}")
+    return history
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train invoice processor model')
-    parser.add_argument('--image_dir', type=str, default='../training_data/images', 
-                        help='Directory containing image files')
-    parser.add_argument('--label_dir', type=str, default='../training_data/labels', 
-                        help='Directory containing JSON label files')
-    parser.add_argument('--model_dir', type=str, default='../models', 
-                        help='Directory to save the trained model')
-    parser.add_argument('--log_dir', type=str, default='../logs', 
-                        help='Directory to save logs and plots')
-    parser.add_argument('--checkpoint_dir', type=str, default='../model_checkpoints', 
-                        help='Directory to save model checkpoints')
-    parser.add_argument('--img_height', type=int, default=800, 
-                        help='Image height for model input')
-    parser.add_argument('--img_width', type=int, default=800, 
-                        help='Image width for model input')
-    parser.add_argument('--max_text_length', type=int, default=512, 
-                        help='Maximum text length for BERT input')
-    parser.add_argument('--num_fields', type=int, default=10, 
-                        help='Number of invoice fields to extract')
-    parser.add_argument('--train_split', type=float, default=0.8, 
-                        help='Ratio of data to use for training')
-    parser.add_argument('--epochs', type=int, default=20, 
-                        help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=8, 
-                        help='Training batch size')
+def main():
+    parser = argparse.ArgumentParser(description="Train an invoice processing model")
+    
+    # Data processing arguments
+    parser.add_argument("--images_dir", type=str, default="training_data/images",
+                        help="Directory containing invoice images")
+    parser.add_argument("--labels_dir", type=str, default="training_data/labels",
+                        help="Directory containing label JSON files")
+    parser.add_argument("--processed_dir", type=str, default="processed_data",
+                        help="Directory to save processed data")
+    parser.add_argument("--max_examples", type=int, default=None,
+                        help="Maximum number of examples to process (for debugging)")
+    parser.add_argument("--skip_processing", action="store_true",
+                        help="Skip data processing step (use existing processed data)")
+    
+    # Model arguments
+    parser.add_argument("--tokenizer_name", type=str, default="bert-base-uncased",
+                        help="Name of the tokenizer to use")
+    parser.add_argument("--vocab_size", type=int, default=30000,
+                        help="Size of token vocabulary")
+    parser.add_argument("--max_seq_len", type=int, default=512,
+                        help="Maximum sequence length for tokens")
+    parser.add_argument("--embed_dim", type=int, default=256,
+                        help="Embedding dimension for model")
+    parser.add_argument("--image_size", type=int, default=224,
+                        help="Size to resize images to (square)")
+    
+    # Training arguments
+    parser.add_argument("--batch_size", type=int, default=8,
+                        help="Batch size for training")
+    parser.add_argument("--epochs", type=int, default=20,
+                        help="Number of epochs to train for")
+    parser.add_argument("--learning_rate", type=float, default=1e-4,
+                        help="Learning rate")
+    parser.add_argument("--weight_decay", type=float, default=1e-5,
+                        help="Weight decay")
+    parser.add_argument("--train_ratio", type=float, default=0.8,
+                        help="Ratio of data to use for training (vs. validation)")
+    parser.add_argument("--patience", type=int, default=5,
+                        help="Patience for early stopping")
+    parser.add_argument("--num_workers", type=int, default=4,
+                        help="Number of workers for data loading")
+    parser.add_argument("--checkpoints_dir", type=str, default="checkpoints",
+                        help="Directory to save model checkpoints")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
     
     args = parser.parse_args()
-    main(args) 
+    
+    # Set random seed
+    set_seed(args.seed)
+    
+    # Create output directories
+    os.makedirs(args.processed_dir, exist_ok=True)
+    os.makedirs(args.checkpoints_dir, exist_ok=True)
+    
+    # Process data
+    if not args.skip_processing:
+        process_data(args)
+    
+    # Train model
+    train_model(args)
+
+if __name__ == "__main__":
+    main() 

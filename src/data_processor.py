@@ -2,176 +2,275 @@ import os
 import json
 import cv2
 import numpy as np
-from pathlib import Path
 import pandas as pd
-from tqdm import tqdm
-from pdf2image import convert_from_path
-import tensorflow as tf
+from PIL import Image
+from pathlib import Path
+from typing import Dict, List, Tuple, Any, Optional
 
 class InvoiceDataProcessor:
-    def __init__(self, image_dir, label_dir, img_size=(800, 800)):
-        self.image_dir = Path(image_dir)
-        self.label_dir = Path(label_dir)
-        self.img_size = img_size
-        self.image_files = [f for f in os.listdir(image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))]
-        self.label_files = [f for f in os.listdir(label_dir) if f.endswith('.json')]
+    """
+    Process invoice images and their associated JSON annotations.
+    This class handles loading, preprocessing, and preparing the data for model training.
+    """
+    def __init__(self, 
+                images_dir: str, 
+                labels_dir: str,
+                output_size: Tuple[int, int] = (800, 800),
+                max_examples: int = None):
+        """
+        Initialize the data processor.
         
-    def load_image(self, image_path):
-        """Load and preprocess an image file"""
-        img = cv2.imread(str(image_path))
-        if img is None:
-            raise ValueError(f"Unable to read image: {image_path}")
+        Args:
+            images_dir: Directory containing invoice images
+            labels_dir: Directory containing JSON label files
+            output_size: Resized image dimensions (height, width)
+            max_examples: Maximum number of examples to process (for debugging)
+        """
+        self.images_dir = Path(images_dir)
+        self.labels_dir = Path(labels_dir)
+        self.output_size = output_size
+        self.max_examples = max_examples
         
-        # Convert BGR to RGB
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # Validate directories
+        if not self.images_dir.exists():
+            raise ValueError(f"Images directory {images_dir} does not exist")
+        if not self.labels_dir.exists():
+            raise ValueError(f"Labels directory {labels_dir} does not exist")
+            
+        self.image_files = list(self.images_dir.glob("*.jpg"))
+        if max_examples:
+            self.image_files = self.image_files[:max_examples]
         
-        # Resize image
-        img = cv2.resize(img, self.img_size)
+        print(f"Found {len(self.image_files)} image files")
         
-        # Normalize image
-        img = img.astype(np.float32) / 255.0
+    def _load_image(self, image_path: Path) -> np.ndarray:
+        """Load and preprocess an image"""
+        # Read image
+        image = cv2.imread(str(image_path))
+        if image is None:
+            raise ValueError(f"Failed to load image {image_path}")
         
-        return img
+        # Convert to RGB
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Resize
+        image = cv2.resize(image, (self.output_size[1], self.output_size[0]))
+        
+        # Normalize to [0, 1]
+        image = image.astype(np.float32) / 255.0
+        
+        return image
     
-    def load_pdf(self, pdf_path):
-        """Convert PDF to images"""
-        images = convert_from_path(pdf_path)
-        return [np.array(img) for img in images]
+    def _find_matching_json(self, image_path: Path) -> Optional[Path]:
+        """Find matching JSON file for an image"""
+        image_name = image_path.stem
+        
+        # Try direct match
+        direct_match = self.labels_dir / f"{image_name}.json"
+        if direct_match.exists():
+            return direct_match
+        
+        # Try removing trailing numbers
+        base_name = ''.join([c for c in image_name if not c.isdigit()])
+        for json_file in self.labels_dir.glob("*.json"):
+            if base_name in json_file.stem:
+                return json_file
+        
+        return None
     
-    def parse_label(self, label_path):
-        """Parse JSON label file and extract key information"""
-        with open(label_path, 'r') as f:
+    def _process_json_labels(self, json_path: Path, image_shape: Tuple[int, int]) -> Dict:
+        """
+        Process JSON labels and normalize bounding box coordinates
+        """
+        # Load JSON
+        with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # Extract relevant fields
-        fields = {}
+        # Extract fields and bounding boxes
+        processed_data = {
+            'fields': [],
+            'boxes': [],
+            'values': []
+        }
         
         if 'pages' in data and len(data['pages']) > 0:
-            page = data['pages'][0]
+            page = data['pages'][0]  # For now, we process only the first page
             
-            # Process lines and words to extract field values
-            lines = page.get('lines', [])
-            words = page.get('words', [])
+            orig_height = page.get('height', 1)
+            orig_width = page.get('width', 1)
             
-            # Extract all text for document-level feature
-            document_text = " ".join([line.get('content', '') for line in lines])
-            fields['document_text'] = document_text
-            
-            # Create word coordinates and text for layout understanding
-            word_info = []
-            for word in words:
-                if 'polygon' in word and 'content' in word:
-                    # Calculate normalized bounding box coordinates
-                    polygon = word['polygon']
-                    x_coords = [point.get('x', 0) for point in polygon]
-                    y_coords = [point.get('y', 0) for point in polygon]
-                    
-                    if x_coords and y_coords:  # Make sure coordinates exist
-                        x_min, y_min = min(x_coords), min(y_coords)
-                        x_max, y_max = max(x_coords), max(y_coords)
-                        
-                        # Get page dimensions
-                        page_width = page.get('width', 1)
-                        page_height = page.get('height', 1)
-                        
-                        # Normalize coordinates
-                        x_min_norm = x_min / page_width
-                        y_min_norm = y_min / page_height
-                        x_max_norm = x_max / page_width
-                        y_max_norm = y_max / page_height
-                        
-                        word_info.append({
-                            'text': word.get('content', ''),
-                            'bbox': [x_min_norm, y_min_norm, x_max_norm, y_max_norm],
-                            'confidence': word.get('confidence', 1.0)
-                        })
-            
-            fields['words'] = word_info
-            
-            # Try to extract common invoice fields
-            # This is a simplified approach - in a real application we would use NER or more sophisticated extraction
-            fields['invoice_number'] = self.extract_field(document_text, words, ['invoice #', 'invoice no', 'invoice number'])
-            fields['date'] = self.extract_field(document_text, words, ['date', 'invoice date'])
-            fields['due_date'] = self.extract_field(document_text, words, ['due date'])
-            fields['total_amount'] = self.extract_field(document_text, words, ['total', 'amount', 'balance', 'due'])
-            fields['vendor_name'] = self.extract_field(document_text, words, ['vendor', 'company', 'from'])
-            fields['customer_name'] = self.extract_field(document_text, words, ['bill to', 'customer', 'client'])
-            
-            
-        return fields
-    
-    def extract_field(self, text, words, keywords):
-        """Extract field value based on keyword context"""
-        # Simple extraction logic - can be enhanced with regex or ML approaches
-        text_lower = text.lower()
-        
-        for keyword in keywords:
-            if keyword.lower() in text_lower:
-                # Find the word that follows the keyword
-                index = text_lower.find(keyword.lower())
-                if index != -1:
-                    # Extract the next few words after the keyword
-                    segment = text[index + len(keyword):index + len(keyword) + 50].strip()
-                    return segment
-        
-        return ""
-    
-    def create_dataset(self, split_ratio=0.8):
-        """Create TF dataset from images and labels"""
-        images = []
-        labels = []
-        matched_files = []
-        
-        for img_file in tqdm(self.image_files, desc="Processing files"):
-            # Find corresponding JSON file (handle different naming conventions)
-            img_name = os.path.splitext(img_file)[0]
-            json_candidates = [
-                f"{img_name}.json",
-                f"{img_name.split('_')[0]}.json"  # Try base name
-            ]
-            
-            json_file = None
-            for candidate in json_candidates:
-                if candidate in self.label_files:
-                    json_file = candidate
-                    break
-            
-            if json_file is None:
-                print(f"No matching JSON found for {img_file}, skipping...")
-                continue
+            # Process each line (text extraction)
+            for line in page.get('lines', []):
+                text = line.get('content', '')
+                polygon = line.get('polygon', [])
                 
+                if not polygon or not text:
+                    continue
+                
+                # Extract and normalize coordinates
+                x_coords = [p['x'] / orig_width for p in polygon]
+                y_coords = [p['y'] / orig_height for p in polygon]
+                
+                # Calculate bounding box
+                x_min, y_min = min(x_coords), min(y_coords)
+                x_max, y_max = max(x_coords), max(y_coords)
+                
+                # Convert to [x_min, y_min, width, height] format, normalized
+                box = [
+                    x_min,
+                    y_min,
+                    x_max - x_min,
+                    y_max - y_min
+                ]
+                
+                # Add to processed data
+                processed_data['fields'].append("text")
+                processed_data['boxes'].append(box)
+                processed_data['values'].append(text)
+        
+        return processed_data
+    
+    def extract_key_fields(self, processed_data: Dict) -> Dict:
+        """
+        Extract key fields from processed data: invoice number, date, total, vendor, etc.
+        Uses heuristic rules to identify important fields
+        """
+        key_fields = {
+            'invoice_number': None,
+            'date': None,
+            'due_date': None,
+            'total_amount': None,
+            'vendor_name': None,
+            'vendor_address': None,
+            'customer_name': None,
+            'customer_address': None,
+        }
+        
+        # Simple heuristics - can be expanded with more sophisticated methods
+        for field, box, value in zip(processed_data['fields'], processed_data['boxes'], processed_data['values']):
+            value_lower = value.lower()
+            
+            # Invoice number detection
+            if ('invoice' in value_lower and '#' in value_lower) or ('invoice' in value_lower and 'no' in value_lower):
+                words = value.split()
+                for i, word in enumerate(words):
+                    if i < len(words) - 1 and ('invoice' in word.lower() and ('#' in words[i+1] or 'no' in word.lower())):
+                        key_fields['invoice_number'] = words[i+1].replace('#', '')
+            
+            # Date detection
+            if 'date' in value_lower and not 'due' in value_lower:
+                parts = value.split()
+                for part in parts:
+                    if '/' in part or '-' in part:
+                        key_fields['date'] = part
+            
+            # Due date
+            if 'due' in value_lower and 'date' in value_lower:
+                parts = value.split()
+                for part in parts:
+                    if '/' in part or '-' in part:
+                        key_fields['due_date'] = part
+            
+            # Total amount
+            if ('total' in value_lower or 'amount' in value_lower or 'balance' in value_lower) and ('$' in value or '.' in value):
+                for word in value.split():
+                    if ('$' in word or '.' in word) and any(c.isdigit() for c in word):
+                        key_fields['total_amount'] = word.replace('$', '')
+        
+        return key_fields
+    
+    def create_dataset(self):
+        """
+        Create a dataset of images and processed labels
+        """
+        dataset = []
+        
+        for i, image_path in enumerate(self.image_files):
             try:
-                # Load image and label
-                img_path = self.image_dir / img_file
-                label_path = self.label_dir / json_file
+                print(f"Processing image {i+1}/{len(self.image_files)}: {image_path.name}")
                 
-                img = self.load_image(img_path)
-                label_data = self.parse_label(label_path)
+                # Find matching JSON
+                json_path = self._find_matching_json(image_path)
+                if json_path is None:
+                    print(f"Warning: No matching JSON found for {image_path}")
+                    continue
                 
-                # For now, we'll use the document text as our label
-                # In a real application, we would create a more structured label format
-                images.append(img)
-                labels.append(label_data)
-                matched_files.append((img_file, json_file))
+                # Load and process image
+                image = self._load_image(image_path)
+                
+                # Process JSON
+                processed_data = self._process_json_labels(json_path, image.shape[:2])
+                
+                # Extract key fields
+                key_fields = self.extract_key_fields(processed_data)
+                
+                # Add to dataset
+                dataset.append({
+                    'image': image,
+                    'image_path': str(image_path),
+                    'json_path': str(json_path),
+                    'processed_data': processed_data,
+                    'key_fields': key_fields
+                })
+                
             except Exception as e:
-                print(f"Error processing {img_file} and {json_file}: {e}")
+                print(f"Error processing {image_path}: {e}")
+                continue
         
-        # Split into training and validation sets
-        n_samples = len(images)
-        n_train = int(n_samples * split_ratio)
-        
-        # Create TF datasets
-        train_images = images[:n_train]
-        train_labels = labels[:n_train]
-        val_images = images[n_train:]
-        val_labels = labels[n_train:]
-        
-        print(f"Created dataset with {len(train_images)} training and {len(val_images)} validation samples")
-        
-        return (train_images, train_labels), (val_images, val_labels), matched_files
+        print(f"Successfully created dataset with {len(dataset)} examples")
+        return dataset
     
-    def prepare_batch_data(self, images, labels):
-        """Convert raw data into model-ready format"""
-        # This would be expanded based on the model architecture
-        # For example, converting label dictionaries to tensors
-        return np.array(images), labels 
+    def save_processed_dataset(self, output_dir: str):
+        """
+        Save processed dataset to disk
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        dataset = self.create_dataset()
+        
+        # Save images
+        images_dir = output_path / "processed_images"
+        images_dir.mkdir(exist_ok=True)
+        
+        # Save annotations
+        annotations_path = output_path / "annotations.json"
+        
+        annotations = []
+        for i, item in enumerate(dataset):
+            # Save image
+            img_filename = f"image_{i:05d}.jpg"
+            img = (item['image'] * 255).astype(np.uint8)
+            img_pil = Image.fromarray(img)
+            img_pil.save(images_dir / img_filename)
+            
+            # Add annotation
+            annotation = {
+                'image_id': i,
+                'image_filename': img_filename,
+                'original_image': item['image_path'],
+                'original_json': item['json_path'],
+                'boxes': item['processed_data']['boxes'],
+                'fields': item['processed_data']['fields'],
+                'values': item['processed_data']['values'],
+                'key_fields': item['key_fields']
+            }
+            annotations.append(annotation)
+        
+        # Save annotations
+        with open(annotations_path, 'w', encoding='utf-8') as f:
+            json.dump(annotations, f, indent=2)
+            
+        print(f"Saved {len(annotations)} processed examples to {output_path}")
+        return output_path
+
+if __name__ == "__main__":
+    # Example usage
+    processor = InvoiceDataProcessor(
+        images_dir="training_data/images",
+        labels_dir="training_data/labels", 
+        output_size=(800, 800),
+        max_examples=10  # For testing
+    )
+    
+    processor.save_processed_dataset("processed_data")

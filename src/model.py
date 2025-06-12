@@ -1,228 +1,329 @@
-import tensorflow as tf
-from tensorflow.keras import layers, Model, applications
-from transformers import TFBertModel, BertTokenizer
-import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import timm
+from typing import Dict, List, Tuple, Optional
 
-class InvoiceProcessor:
-    def __init__(self, img_size=(800, 800), max_text_length=512, num_fields=10):
-        self.img_size = img_size
-        self.max_text_length = max_text_length
-        self.num_fields = num_fields  # Number of fields to extract
+class InvoiceTextEncoder(nn.Module):
+    """Text encoder for invoice words/lines"""
+    def __init__(self, vocab_size: int = 30000, embed_dim: int = 256, num_layers: int = 3):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer=nn.TransformerEncoderLayer(
+                d_model=embed_dim, 
+                nhead=8, 
+                dim_feedforward=1024,
+                batch_first=True
+            ),
+            num_layers=num_layers
+        )
+        self.output_proj = nn.Linear(embed_dim, embed_dim)
         
-        # Initialize tokenizer
-        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: Input tensor of token indices [batch_size, seq_len]
+            mask: Optional attention mask
+        Returns:
+            Encoded text features
+        """
+        x = self.embedding(x)
+        x = self.transformer(x, src_key_padding_mask=mask)
+        x = self.output_proj(x)
+        return x
+
+class LayoutPositionalEncoding(nn.Module):
+    """Positional encoding for 2D layout information"""
+    def __init__(self, embed_dim: int = 256):
+        super().__init__()
+        self.pos_encoder_x = nn.Linear(1, embed_dim // 4)
+        self.pos_encoder_y = nn.Linear(1, embed_dim // 4)
+        self.pos_encoder_w = nn.Linear(1, embed_dim // 4)
+        self.pos_encoder_h = nn.Linear(1, embed_dim // 4)
+        self.output_proj = nn.Linear(embed_dim, embed_dim)
         
-        # Build the model
-        self.model = self.build_model()
+    def forward(self, boxes):
+        """
+        Args:
+            boxes: Normalized bounding boxes [batch_size, num_boxes, 4]
+                  Format: [x_min, y_min, width, height]
+        Returns:
+            Position encodings
+        """
+        # Split into components
+        x_min = boxes[:, :, 0:1]
+        y_min = boxes[:, :, 1:2]
+        width = boxes[:, :, 2:3]
+        height = boxes[:, :, 3:4]
         
-    def build_model(self):
-        """Build a model that combines image and text features"""
-        # 1. Image input branch using EfficientNet for feature extraction
-        image_input = layers.Input(shape=(self.img_size[0], self.img_size[1], 3), name='image_input')
+        # Encode each component
+        x_enc = self.pos_encoder_x(x_min)
+        y_enc = self.pos_encoder_y(y_min)
+        w_enc = self.pos_encoder_w(width)
+        h_enc = self.pos_encoder_h(height)
         
-        # Use a pre-trained CNN as feature extractor
-        base_model = applications.EfficientNetB3(
-            include_top=False,
-            weights='imagenet',
-            input_tensor=image_input
+        # Concatenate
+        pos_enc = torch.cat([x_enc, y_enc, w_enc, h_enc], dim=-1)
+        pos_enc = self.output_proj(pos_enc)
+        
+        return pos_enc
+
+class InvoiceVisionModel(nn.Module):
+    """Vision component of the invoice model using a pre-trained ViT"""
+    def __init__(self, pretrained: bool = True, embed_dim: int = 768):
+        super().__init__()
+        # Use ViT as the visual backbone
+        self.backbone = timm.create_model(
+            'vit_base_patch16_224', 
+            pretrained=pretrained,
+            num_classes=0  # Remove classifier head
         )
         
-        # Freeze early layers to prevent overfitting
-        for layer in base_model.layers[:100]:
-            layer.trainable = False
-            
-        # Add global pooling to get a fixed-size feature vector
-        image_features = layers.GlobalAveragePooling2D()(base_model.output)
-        image_features = layers.Dropout(0.3)(image_features)
-        image_features = layers.Dense(512, activation='relu')(image_features)
+        # Project backbone features to common embedding space
+        self.projection = nn.Linear(self.backbone.embed_dim, embed_dim)
+    
+    def forward(self, images):
+        """
+        Args:
+            images: Input images [batch_size, channels, height, width]
+        Returns:
+            Visual features
+        """
+        # Get features from backbone
+        features = self.backbone.forward_features(images)  # [B, num_patches, embed_dim]
         
-        # 2. Text input branch using BERT for text understanding
-        # Input for text tokens, attention mask, and token type IDs
-        input_ids = layers.Input(shape=(self.max_text_length,), dtype=tf.int32, name='input_ids')
-        attention_mask = layers.Input(shape=(self.max_text_length,), dtype=tf.int32, name='attention_mask')
-        token_type_ids = layers.Input(shape=(self.max_text_length,), dtype=tf.int32, name='token_type_ids')
+        # Project to common embedding space
+        features = self.projection(features)
         
-        # BERT layer
-        bert_model = TFBertModel.from_pretrained('bert-base-uncased')
-        
-        # Freeze BERT layers to prevent overfitting (optional)
-        bert_model.trainable = False
-        
-        # Fix: Modified BERT input handling
-        bert_outputs = bert_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids
-        )
-        
-        # Use CLS token output as document representation
-        text_features = bert_outputs[0][:, 0, :]  # Get the [CLS] token embeddings
-        text_features = layers.Dropout(0.3)(text_features)
-        text_features = layers.Dense(512, activation='relu')(text_features)
-        
-        # 3. Combine features from both branches
-        combined_features = layers.concatenate([image_features, text_features])
-        combined_features = layers.Dense(1024, activation='relu')(combined_features)
-        combined_features = layers.Dropout(0.5)(combined_features)
-        combined_features = layers.Dense(512, activation='relu')(combined_features)
-        
-        # 4. Outputs for different fields
-        # We'll create multiple outputs for different invoice fields
-        # Each output will be a head with character-level prediction
-        outputs = {}
-        
-        # Common fields in invoices
-        field_names = [
-            'invoice_number', 'date', 'due_date', 'total_amount', 
-            'vendor_name', 'customer_name', 'tax_amount', 
-            'subtotal', 'payment_terms', 'description'
+        return features
+
+class KeyFieldExtractor(nn.Module):
+    """Extract key invoice fields from encoded document features"""
+    def __init__(self, input_dim: int, hidden_dim: int = 512):
+        super().__init__()
+        self.fields = [
+            'invoice_number', 'date', 'due_date', 'total_amount',
+            'vendor_name', 'customer_name'
         ]
         
-        for field in field_names[:self.num_fields]:
-            # For each field, we predict a probability of each character class
-            field_out = layers.Dense(256, activation='relu')(combined_features)
-            field_out = layers.Dense(128, activation='relu')(field_out)
-            
-            # For simplicity, we'll predict each field as a 50-character sequence with vocab size 100
-            # In a real system, you would use a more sophisticated approach
-            field_out = layers.Dense(50 * 100, activation='linear')(field_out)
-            field_out = layers.Reshape((50, 100))(field_out)
-            field_out = layers.Softmax(axis=-1)(field_out)
-            
-            outputs[field] = field_out
-        
-        # Create the model with multiple inputs and outputs
-        model = Model(
-            inputs=[image_input, input_ids, attention_mask, token_type_ids],
-            outputs=outputs
+        # Shared encoding
+        self.shared_encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)
         )
         
-        # Compile with loss and metrics
-        losses = {field: 'categorical_crossentropy' for field in field_names[:self.num_fields]}
-        loss_weights = {field: 1.0 for field in field_names[:self.num_fields]}
-        
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
-            loss=losses,
-            loss_weights=loss_weights,
-            metrics=['accuracy']
-        )
-        
-        return model
+        # Field-specific heads
+        self.field_extractors = nn.ModuleDict()
+        for field in self.fields:
+            self.field_extractors[field] = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)  # Output confidence score
+            )
     
-    def prepare_batch(self, images, text_data):
-        """Prepare a batch of data for training"""
-        # Tokenize text data
-        encodings = self.tokenizer(
-            text_data,
-            truncation=True,
-            padding='max_length',
-            max_length=self.max_text_length,
-            return_tensors='tf'
+    def forward(self, features, word_features, boxes):
+        """
+        Args:
+            features: Document-level features [batch_size, embed_dim]
+            word_features: Word-level features [batch_size, num_words, embed_dim]
+            boxes: Word bounding boxes [batch_size, num_words, 4]
+        Returns:
+            Dictionary of predicted field values and locations
+        """
+        batch_size, num_words, _ = word_features.shape
+        
+        # Process document features
+        doc_encoding = self.shared_encoder(features)
+        
+        # For each field, predict which text element contains the value
+        results = {}
+        for field in self.fields:
+            # Expand document features to match words
+            doc_features_expanded = doc_encoding.unsqueeze(1).expand(-1, num_words, -1)
+            
+            # Predict confidence score for each word
+            field_scores = self.field_extractors[field](doc_features_expanded).squeeze(-1)
+            
+            # Get most likely word for this field
+            confidence, indices = torch.max(field_scores, dim=1)
+            
+            # Store predictions
+            results[field] = {
+                'indices': indices,               # Indices of most likely words
+                'confidence': confidence          # Confidence scores
+            }
+        
+        return results
+
+class InvoiceProcessorModel(nn.Module):
+    """Complete invoice processing model"""
+    def __init__(self,
+                 vocab_size: int = 30000,
+                 max_seq_length: int = 512,
+                 embed_dim: int = 256):
+        super().__init__()
+        
+        # Visual backbone
+        self.vision_model = InvoiceVisionModel(pretrained=True, embed_dim=embed_dim)
+        
+        # Text encoding for OCR tokens
+        self.text_encoder = InvoiceTextEncoder(
+            vocab_size=vocab_size,
+            embed_dim=embed_dim,
+            num_layers=3
         )
         
-        # Create BERT inputs
-        input_ids = encodings['input_ids']
-        attention_mask = encodings['attention_mask']
-        token_type_ids = encodings['token_type_ids']
+        # Layout position encoding
+        self.layout_encoder = LayoutPositionalEncoding(embed_dim=embed_dim)
+        
+        # Multimodal fusion transformer
+        self.fusion_transformer = nn.TransformerEncoder(
+            encoder_layer=nn.TransformerEncoderLayer(
+                d_model=embed_dim,
+                nhead=8,
+                dim_feedforward=1024,
+                batch_first=True
+            ),
+            num_layers=4
+        )
+        
+        # Document-level pooling
+        self.doc_pooler = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+        
+        # Field extractor
+        self.field_extractor = KeyFieldExtractor(
+            input_dim=embed_dim,
+            hidden_dim=512
+        )
+    
+    def forward(self, images, tokens, boxes, token_mask=None):
+        """
+        Args:
+            images: Batch of invoice images [batch_size, channels, height, width]
+            tokens: OCR token ids [batch_size, seq_length]
+            boxes: Normalized bounding boxes for OCR tokens [batch_size, seq_length, 4]
+            token_mask: Mask for padding tokens (1 for pad, 0 for valid)
+        Returns:
+            Dictionary of extracted fields with values and confidence scores
+        """
+        # Get visual features
+        visual_features = self.vision_model(images)
+        
+        # Get text features
+        text_features = self.text_encoder(tokens, mask=token_mask)
+        
+        # Get position encoding
+        pos_encoding = self.layout_encoder(boxes)
+        
+        # Combine text features and position encoding
+        text_pos_features = text_features + pos_encoding
+        
+        # Concatenate visual and text features
+        # We use the visual tokens (patch embeddings) and OCR token embeddings
+        combined_features = torch.cat([visual_features, text_pos_features], dim=1)
+        
+        # Create attention mask for the combined features
+        # Visual tokens can attend to all other tokens
+        seq_len = visual_features.size(1) + text_pos_features.size(1)
+        visual_len = visual_features.size(1)
+        
+        # If token_mask is provided, extend it to include visual tokens
+        if token_mask is not None:
+            # token_mask has 1 for pad tokens, 0 for valid tokens
+            # We need to add zeros for visual tokens (all valid)
+            batch_size = token_mask.size(0)
+            extended_mask = torch.zeros((batch_size, seq_len), device=token_mask.device)
+            extended_mask[:, visual_len:] = token_mask
+        else:
+            extended_mask = None
+        
+        # Process through fusion transformer
+        fused_features = self.fusion_transformer(combined_features, src_key_padding_mask=extended_mask)
+        
+        # Pool document features for global representation
+        # Take CLS token (first token from ViT)
+        doc_features = fused_features[:, 0]
+        doc_features = self.doc_pooler(doc_features)
+        
+        # Extract OCR word features (skip visual tokens)
+        word_features = fused_features[:, visual_len:]
+        
+        # Extract fields
+        field_predictions = self.field_extractor(doc_features, word_features, boxes)
         
         return {
-            'image_input': np.array(images),
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'token_type_ids': token_type_ids
+            'doc_features': doc_features,
+            'word_features': word_features,
+            'field_predictions': field_predictions
         }
-        
-    def train(self, train_images, train_text, val_images, val_text, train_labels, val_labels, epochs=10, batch_size=8):
-        """Train the model"""
-        # Prepare data
-        train_inputs = self.prepare_batch(train_images, train_text)
-        val_inputs = self.prepare_batch(val_images, val_text)
-        
-        # Convert labels to one-hot encoding (simplified)
-        # In a real system, this would be more complex based on your label format
-        train_outputs = {}
-        val_outputs = {}
-        
-        field_names = [
-            'invoice_number', 'date', 'due_date', 'total_amount', 
-            'vendor_name', 'customer_name', 'tax_amount', 
-            'subtotal', 'payment_terms', 'description'
-        ]
-        
-        for idx, field in enumerate(field_names[:self.num_fields]):
-            # This is a simplified placeholder - you would need to convert your actual labels
-            # to the appropriate format for each field
-            zeros = np.zeros((len(train_labels), 50, 100))
-            train_outputs[field] = zeros
-            
-            zeros_val = np.zeros((len(val_labels), 50, 100))
-            val_outputs[field] = zeros_val
-        
-        # Create callbacks for model checkpoints and early stopping
-        checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-            filepath='model_checkpoints/model_{epoch:02d}_{val_loss:.2f}.h5',
-            monitor='val_loss',
-            save_best_only=True,
-            save_weights_only=True,
-            mode='min'
-        )
-        
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=5,
-            restore_best_weights=True
-        )
-        
-        # Train the model
-        history = self.model.fit(
-            train_inputs,
-            train_outputs,
-            validation_data=(val_inputs, val_outputs),
-            epochs=epochs,
-            batch_size=batch_size,
-            callbacks=[checkpoint_callback, early_stopping]
-        )
-        
-        return history
     
-    def predict(self, image, text):
-        """Make predictions on a single invoice"""
-        # Prepare input
-        inputs = self.prepare_batch([image], [text])
+    def extract_fields_from_predictions(self, predictions, ocr_texts):
+        """
+        Extract readable field values from model predictions
         
-        # Get model predictions
-        predictions = self.model.predict(inputs)
+        Args:
+            predictions: Model predictions dict
+            ocr_texts: Original OCR text for each token [batch_size, seq_length]
+        Returns:
+            Dictionary mapping field names to extracted text values
+        """
+        batch_size = len(ocr_texts)
+        field_preds = predictions['field_predictions']
         
-        # Process predictions
-        results = {}
-        field_names = [
-            'invoice_number', 'date', 'due_date', 'total_amount', 
-            'vendor_name', 'customer_name', 'tax_amount', 
-            'subtotal', 'payment_terms', 'description'
-        ]
+        results = []
+        for b in range(batch_size):
+            sample_results = {}
+            for field_name, field_data in field_preds.items():
+                index = field_data['indices'][b].item()
+                confidence = field_data['confidence'][b].item()
+                
+                # Only include predictions with reasonable confidence
+                if confidence > 0.5 and index < len(ocr_texts[b]):
+                    sample_results[field_name] = {
+                        'text': ocr_texts[b][index],
+                        'confidence': confidence
+                    }
+                else:
+                    sample_results[field_name] = {
+                        'text': "",
+                        'confidence': confidence
+                    }
+            
+            results.append(sample_results)
         
-        for idx, field in enumerate(field_names[:self.num_fields]):
-            # Convert from one-hot predictions to text (simplified)
-            # In a real system, this would be more complex
-            char_indices = np.argmax(predictions[field][0], axis=1)
-            
-            # Map indices to characters (simplified placeholder)
-            # This would be replaced with your actual character mapping
-            char_mapping = {i: chr(i + 32) for i in range(100)}
-            field_text = ''.join([char_mapping.get(idx, '') for idx in char_indices])
-            
-            # Clean up the output (remove padding, etc.)
-            field_text = field_text.strip()
-            
-            results[field] = field_text
-            
         return results
+
+
+def create_invoice_model(
+    pretrained: bool = True, 
+    vocab_size: int = 30000,
+    max_seq_len: int = 512, 
+    embed_dim: int = 256
+) -> InvoiceProcessorModel:
+    """
+    Create an instance of the InvoiceProcessorModel
     
-    def save_model(self, filepath):
-        """Save model weights"""
-        self.model.save_weights(filepath)
-        
-    def load_model(self, filepath):
-        """Load model weights"""
-        self.model.load_weights(filepath) 
+    Args:
+        pretrained: Whether to use pretrained vision backbone
+        vocab_size: Size of token vocabulary
+        max_seq_len: Maximum sequence length for tokens
+        embed_dim: Embedding dimension
+    Returns:
+        Initialized model
+    """
+    model = InvoiceProcessorModel(
+        vocab_size=vocab_size,
+        max_seq_length=max_seq_len,
+        embed_dim=embed_dim
+    )
+    
+    return model 
