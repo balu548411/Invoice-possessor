@@ -48,10 +48,15 @@ class InvoiceProcessor:
         # Freeze BERT layers to prevent overfitting (optional)
         bert_model.trainable = False
         
-        bert_output = bert_model([input_ids, attention_mask, token_type_ids])[0]
+        # Fix: Modified BERT input handling
+        bert_outputs = bert_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids
+        )
         
         # Use CLS token output as document representation
-        text_features = bert_output[:, 0, :]
+        text_features = bert_outputs[0][:, 0, :]  # Get the [CLS] token embeddings
         text_features = layers.Dropout(0.3)(text_features)
         text_features = layers.Dense(512, activation='relu')(text_features)
         
