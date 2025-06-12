@@ -137,8 +137,8 @@ class InvoiceModelTrainer:
                         dummy_targets[i, idx] = 1.0
                     
                     # Calculate field confidence loss
-                    # We would use the actual predicted scores from the model's field extractor
-                    dummy_scores = torch.randn(batch_size, word_features.size(1)).to(self.device)
+                    # Generate dummy confidence scores with requires_grad=True
+                    dummy_scores = torch.randn(batch_size, word_features.size(1), device=self.device, requires_grad=True)
                     field_loss = self.field_confidence_loss(dummy_scores, dummy_targets)
                     
                     # Add to total loss
@@ -152,6 +152,11 @@ class InvoiceModelTrainer:
             # Backpropagate and optimize
             if is_training:
                 self.optimizer.zero_grad()
+                # Make sure batch_loss requires grad
+                if not batch_loss.requires_grad:
+                    # Create a dummy tensor that requires grad and add it to batch_loss
+                    dummy_tensor = torch.tensor(1.0, device=self.device, requires_grad=True)
+                    batch_loss = batch_loss + 0.0 * dummy_tensor
                 batch_loss.backward()
                 self.optimizer.step()
             

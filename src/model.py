@@ -106,12 +106,18 @@ class InvoiceVisionModel(nn.Module):
 
 class KeyFieldExtractor(nn.Module):
     """Extract key invoice fields from encoded document features"""
-    def __init__(self, input_dim: int, hidden_dim: int = 512):
+    def __init__(self, input_dim: int, hidden_dim: int = 512, default_fields=None):
         super().__init__()
-        self.fields = [
-            'invoice_number', 'date', 'due_date', 'total_amount',
-            'vendor_name', 'customer_name'
-        ]
+        
+        # Default fields if none provided
+        if default_fields is None:
+            self.fields = [
+                'invoice_number', 'date', 'due_date', 'total_amount',
+                'vendor_name', 'customer_name', 'tax_amount', 'subtotal',
+                'payment_terms', 'po_number', 'vendor_address', 'customer_address'
+            ]
+        else:
+            self.fields = default_fields
         
         # Shared encoding
         self.shared_encoder = nn.Sequential(
@@ -130,6 +136,16 @@ class KeyFieldExtractor(nn.Module):
                 nn.Linear(hidden_dim, hidden_dim // 2),
                 nn.ReLU(),
                 nn.Linear(hidden_dim // 2, 1)  # Output confidence score
+            )
+    
+    def add_field(self, field_name: str, hidden_dim: int):
+        """Dynamically add a new field extractor"""
+        if field_name not in self.field_extractors:
+            self.fields.append(field_name)
+            self.field_extractors[field_name] = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)
             )
     
     def forward(self, features, word_features, boxes):

@@ -132,9 +132,10 @@ class InvoiceDataProcessor:
     
     def extract_key_fields(self, processed_data: Dict) -> Dict:
         """
-        Extract key fields from processed data: invoice number, date, total, vendor, etc.
-        Uses heuristic rules to identify important fields
+        Extract key fields from processed data dynamically.
+        Uses heuristic rules to identify important fields, but also retains all keys from the original data.
         """
+        # Initialize with common invoice fields for compatibility
         key_fields = {
             'invoice_number': None,
             'date': None,
@@ -146,7 +147,13 @@ class InvoiceDataProcessor:
             'customer_address': None,
         }
         
-        # Simple heuristics - can be expanded with more sophisticated methods
+        # Extract all available fields from raw data if present
+        if 'raw_data' in processed_data and isinstance(processed_data['raw_data'], dict):
+            # Copy all keys from the raw data
+            for key, value in processed_data['raw_data'].items():
+                key_fields[key] = value
+        
+        # Apply heuristic rules for common fields if not already extracted
         for field, box, value in zip(processed_data['fields'], processed_data['boxes'], processed_data['values']):
             value_lower = value.lower()
             
@@ -176,6 +183,45 @@ class InvoiceDataProcessor:
                 for word in value.split():
                     if ('$' in word or '.' in word) and any(c.isdigit() for c in word):
                         key_fields['total_amount'] = word.replace('$', '')
+            
+            # Vendor name detection
+            if 'vendor' in value_lower or 'seller' in value_lower or 'from' in value_lower:
+                if not key_fields.get('vendor_name'):
+                    key_fields['vendor_name'] = value
+            
+            # Customer name detection
+            if 'customer' in value_lower or 'bill to' in value_lower or 'buyer' in value_lower:
+                if not key_fields.get('customer_name'):
+                    key_fields['customer_name'] = value
+            
+            # Tax amount
+            if 'tax' in value_lower and ('$' in value or '.' in value):
+                for word in value.split():
+                    if ('$' in word or '.' in word) and any(c.isdigit() for c in word):
+                        key_fields['tax_amount'] = word.replace('$', '')
+            
+            # Subtotal
+            if 'subtotal' in value_lower and ('$' in value or '.' in value):
+                for word in value.split():
+                    if ('$' in word or '.' in word) and any(c.isdigit() for c in word):
+                        key_fields['subtotal'] = word.replace('$', '')
+            
+            # Payment terms
+            if 'terms' in value_lower or 'payment' in value_lower and 'terms' in value_lower:
+                key_fields['payment_terms'] = value
+            
+            # PO number
+            if 'po' in value_lower and 'number' in value_lower:
+                words = value.split()
+                for i, word in enumerate(words):
+                    if i < len(words) - 1 and ('po' in word.lower() and '#' in words[i+1]):
+                        key_fields['po_number'] = words[i+1].replace('#', '')
+        
+        # Include any other field we can identify
+        for field, value in zip(processed_data['fields'], processed_data['values']):
+            field_lower = field.lower().replace(' ', '_')
+            if field_lower not in key_fields and value:
+                key_fields[field_lower] = value
         
         return key_fields
     
