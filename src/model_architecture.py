@@ -86,7 +86,7 @@ class SpatialAttention(nn.Module):
         
         # Add spatial bias based on bounding box relationships
         spatial_bias = self._compute_spatial_bias(boxes)
-        scores = scores + spatial_bias.unsqueeze(0)  # Broadcast to batch
+        scores = scores + spatial_bias  # spatial_bias is already batch-compatible
         
         # Apply attention
         attention_weights = F.softmax(scores, dim=-1)
@@ -101,7 +101,7 @@ class SpatialAttention(nn.Module):
     
     def _compute_spatial_bias(self, boxes: torch.Tensor) -> torch.Tensor:
         """Compute spatial bias based on bounding box relationships"""
-        num_boxes = boxes.size(1)
+        batch_size, num_boxes = boxes.size(0), boxes.size(1)
         
         # Compute center points
         centers = torch.stack([
@@ -114,11 +114,18 @@ class SpatialAttention(nn.Module):
         centers_transposed = centers.unsqueeze(1)  # [batch_size, 1, num_boxes, 2]
         
         distances = torch.norm(centers_expanded - centers_transposed, dim=-1)
+        # distances shape: [batch_size, num_boxes, num_boxes]
         
         # Convert distances to bias (closer boxes have higher bias)
-        spatial_bias = -distances * self.spatial_bias.view(self.num_heads, 1, 1)
+        # Apply spatial bias scaling per head and expand for batch
+        spatial_bias_scale = self.spatial_bias.view(self.num_heads, 1, 1, 1)  # [num_heads, 1, 1, 1]
+        distances_expanded = distances.unsqueeze(0)  # [1, batch_size, num_boxes, num_boxes]
         
-        return spatial_bias.mean(dim=0)  # Average across batch
+        # Compute bias: [num_heads, batch_size, num_boxes, num_boxes]
+        spatial_bias = -distances_expanded * spatial_bias_scale
+        
+        # Transpose to match attention scores format: [batch_size, num_heads, num_boxes, num_boxes]
+        return spatial_bias.transpose(0, 1)
 
 
 class MultiModalInvoiceEncoder(nn.Module):
