@@ -36,15 +36,15 @@ class InvoiceProcessor:
         else:
             self.device = device
         
-        # Load model
-        self.model = self._load_model(model_path)
+        # Set parameters
+        self.image_size = image_size
+        self.max_seq_len = max_seq_len
         
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
-        # Set parameters
-        self.image_size = image_size
-        self.max_seq_len = max_seq_len
+        # Load model
+        self.model = self._load_model(model_path)
         
         print(f"Initialized InvoiceProcessor with model from {model_path} on {self.device}")
     
@@ -77,12 +77,12 @@ class InvoiceProcessor:
         image_array = np.array(image).astype(np.float32) / 255.0
         
         # Normalize with ImageNet stats
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
         image_array = (image_array - mean) / std
         
         # Convert to tensor [C, H, W]
-        image_tensor = torch.from_numpy(image_array).permute(2, 0, 1)
+        image_tensor = torch.from_numpy(image_array).permute(2, 0, 1).float()
         
         # Add batch dimension
         image_tensor = image_tensor.unsqueeze(0)
@@ -168,7 +168,7 @@ class InvoiceProcessor:
         seq_length = len(token_to_text)
         
         # Create output array with zeros for special tokens
-        boxes = np.array(boxes)
+        boxes = np.array(boxes, dtype=np.float32)
         aligned_boxes = np.zeros((seq_length, 4), dtype=np.float32)
         
         # For each token, assign the corresponding box
@@ -205,10 +205,10 @@ class InvoiceProcessor:
         aligned_boxes = self._align_boxes_with_tokens(boxes, tokens_info)
         
         # Prepare inputs for model
-        image_tensor = image_tensor.to(self.device)
+        image_tensor = image_tensor.to(self.device).float()
         tokens = tokens_info['input_ids'].to(self.device)
         attention_mask = tokens_info['attention_mask'].to(self.device)
-        boxes_tensor = torch.from_numpy(aligned_boxes).unsqueeze(0).to(self.device)
+        boxes_tensor = torch.from_numpy(aligned_boxes).unsqueeze(0).to(self.device).float()
         
         # Compute attention mask for tokens
         token_mask = attention_mask.eq(0)
@@ -297,13 +297,17 @@ def main():
     parser.add_argument("--document_path", type=str, required=True, help="Path to the invoice document (image or PDF)")
     parser.add_argument("--output_path", type=str, help="Path to save the output JSON (optional)")
     parser.add_argument("--device", type=str, choices=["cpu", "cuda"], help="Device to run inference on")
+    parser.add_argument("--max_seq_len", type=int, default=512, help="Maximum sequence length for tokens")
+    parser.add_argument("--image_size", type=int, default=224, help="Size to resize images to (square)")
     
     args = parser.parse_args()
     
     # Initialize processor
     processor = InvoiceProcessor(
         model_path=args.model_path,
-        device=args.device
+        device=args.device,
+        max_seq_len=args.max_seq_len,
+        image_size=(args.image_size, args.image_size)
     )
     
     # Process document
