@@ -62,7 +62,6 @@ class InvoiceModelTrainer:
             factor=0.7,
             patience=3,
             min_lr=5e-6,
-            verbose=True
         )
         
         # Define losses - use BCE with logits which is more numerically stable
