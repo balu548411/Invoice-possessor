@@ -156,12 +156,15 @@ class InvoiceModelTrainer:
                                 field_targets[i, best_match_idx] = 1.0
                     
                     # Get confidences from the model
-                    # Create dummy scores with proper gradient connection
-                    # This ensures we properly use the existing field_data['confidence'] tensor
-                    field_confidences = torch.zeros_like(field_targets, requires_grad=True)
-                    for i in range(batch_size):
-                        for j in range(seq_length):
-                            field_confidences[i, j] = field_data['confidence'][i] if j == field_data['indices'][i] else 0.0
+                    # Create scores without in-place operations that break the computational graph
+                    batch_size = images.size(0)
+                    seq_length = word_features.size(1)
+                    
+                    # Create a one-hot encoding of the indices, then multiply by confidence
+                    indices = field_data['indices'].unsqueeze(1)  # [batch_size, 1]
+                    one_hot = torch.zeros(batch_size, seq_length, device=self.device)
+                    one_hot = one_hot.scatter(1, indices, 1.0)  # Non-in-place scatter
+                    field_confidences = one_hot * field_data['confidence'].unsqueeze(1)  # Multiply by confidence scores
                     
                     # Calculate field confidence loss
                     field_loss = self.field_confidence_loss(field_confidences, field_targets)
