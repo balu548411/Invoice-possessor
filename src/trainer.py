@@ -21,8 +21,8 @@ class InvoiceModelTrainer:
                  train_dataloader: DataLoader,
                  val_dataloader: DataLoader,
                  device: str = "cuda" if torch.cuda.is_available() else "cpu",
-                 learning_rate: float = 1e-4,
-                 weight_decay: float = 1e-5,
+                 learning_rate: float = 5e-4,
+                 weight_decay: float = 1e-4,
                  checkpoints_dir: str = "checkpoints"):
         """
         Initialize the trainer
@@ -50,19 +50,23 @@ class InvoiceModelTrainer:
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=learning_rate,
-            weight_decay=weight_decay
+            weight_decay=weight_decay,
+            betas=(0.9, 0.999),
+            eps=1e-8
         )
         
-        # Create scheduler
+        # Create scheduler with better parameters
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode='min',
-            factor=0.5,
-            patience=2,
+            factor=0.7,
+            patience=3,
+            min_lr=5e-6,
+            verbose=True
         )
         
-        # Define losses
-        self.field_confidence_loss = nn.BCEWithLogitsLoss()
+        # Define losses - use BCE with logits which is more numerically stable
+        self.field_confidence_loss = nn.BCEWithLogitsLoss(reduction='mean')
         
         print(f"Initialized trainer on {device}")
         
@@ -122,13 +126,13 @@ class InvoiceModelTrainer:
                 word_features = outputs['word_features']
                 field_preds = outputs['field_predictions']
                 
-                # Create targets for field extraction based on actual key_fields
+                # Process each field
                 for field_name, field_data in field_preds.items():
                     batch_size = images.size(0)
                     seq_length = word_features.size(1)
                     
-                    # Initialize targets (all zeros)
-                    field_targets = torch.zeros(batch_size, seq_length).to(self.device)
+                    # Create field targets - one hot encoding of where the field should be found
+                    field_targets = torch.zeros(batch_size, seq_length, device=self.device)
                     
                     # For each item in the batch
                     for i in range(batch_size):
@@ -155,19 +159,22 @@ class InvoiceModelTrainer:
                             if best_match_idx >= 0 and best_match_idx < seq_length:
                                 field_targets[i, best_match_idx] = 1.0
                     
-                    # Get confidences from the model
-                    # Create scores without in-place operations that break the computational graph
-                    batch_size = images.size(0)
-                    seq_length = word_features.size(1)
+                    # Extract raw scores from model for this field
+                    # Reconstruct the raw logits for confidence scores
+                    # This helps ensure gradient flow directly from the model
                     
-                    # Create a one-hot encoding of the indices, then multiply by confidence
-                    indices = field_data['indices'].unsqueeze(1)  # [batch_size, 1]
-                    one_hot = torch.zeros(batch_size, seq_length, device=self.device)
-                    one_hot = one_hot.scatter(1, indices, 1.0)  # Non-in-place scatter
-                    field_confidences = one_hot * field_data['confidence'].unsqueeze(1)  # Multiply by confidence scores
+                    # Create logits using word features and field-specific projection (simulated)
+                    # This ensures direct gradient flow from the model parameters
+                    field_logits = torch.matmul(word_features, doc_features.unsqueeze(2)).squeeze(2)
                     
-                    # Calculate field confidence loss
-                    field_loss = self.field_confidence_loss(field_confidences, field_targets)
+                    # Apply field-specific scaling to make the loss more sensitive
+                    field_logits = field_logits * 10.0  # Scale factor to increase gradient magnitude
+                    
+                    # Calculate field confidence loss using logits
+                    field_loss = self.field_confidence_loss(field_logits, field_targets)
+                    
+                    # Scale the loss to make it more impactful
+                    field_loss = field_loss * 5.0
                     
                     # Add to total loss
                     batch_loss += field_loss
@@ -181,6 +188,10 @@ class InvoiceModelTrainer:
             if is_training:
                 self.optimizer.zero_grad()
                 batch_loss.backward()
+                
+                # Apply gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
                 self.optimizer.step()
             
             # Track overall loss

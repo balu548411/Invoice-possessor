@@ -119,21 +119,45 @@ class KeyFieldExtractor(nn.Module):
         else:
             self.fields = default_fields
         
-        # Shared encoding
+        # Shared encoding with deeper network
         self.shared_encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1)
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
         )
         
-        # Field-specific heads
+        # Word feature projector for attention 
+        self.word_projector = nn.Linear(input_dim, hidden_dim)
+        
+        # Field-specific attention and extraction heads
+        self.field_attentions = nn.ModuleDict()
         self.field_extractors = nn.ModuleDict()
+        
         for field in self.fields:
+            # Attention mechanism for each field
+            self.field_attentions[field] = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(), 
+                nn.Linear(hidden_dim, 1)
+            )
+            
+            # Field extraction head
             self.field_extractors[field] = nn.Sequential(
+                nn.Linear(hidden_dim * 2, hidden_dim),  # Concat doc + attended word features
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.3),
                 nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.LayerNorm(hidden_dim // 2),
                 nn.ReLU(),
                 nn.Linear(hidden_dim // 2, 1)  # Output confidence score
             )
@@ -142,8 +166,23 @@ class KeyFieldExtractor(nn.Module):
         """Dynamically add a new field extractor"""
         if field_name not in self.field_extractors:
             self.fields.append(field_name)
+            
+            # Attention mechanism
+            self.field_attentions[field_name] = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(), 
+                nn.Linear(hidden_dim, 1)
+            )
+            
+            # Field extraction head
             self.field_extractors[field_name] = nn.Sequential(
+                nn.Linear(hidden_dim * 2, hidden_dim), 
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.3),
                 nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.LayerNorm(hidden_dim // 2),
                 nn.ReLU(),
                 nn.Linear(hidden_dim // 2, 1)
             )
@@ -165,24 +204,64 @@ class KeyFieldExtractor(nn.Module):
         batch_size, num_words, _ = word_features.shape
         
         # Process document features
-        doc_encoding = self.shared_encoder(features)
+        doc_encoding = self.shared_encoder(features)  # [batch_size, hidden_dim]
+        
+        # Process word features through projection
+        word_encoding = self.word_projector(word_features)  # [batch_size, num_words, hidden_dim]
+        
+        # Add positional information from boxes
+        # Simple feature: use box center coordinates as position features
+        box_centers = torch.cat([
+            boxes[:, :, 0:1] + boxes[:, :, 2:3] * 0.5,  # x center
+            boxes[:, :, 1:2] + boxes[:, :, 3:4] * 0.5   # y center
+        ], dim=2)  # [batch_size, num_words, 2]
+        
+        # Create position embeddings
+        pos_embedding = torch.cat([
+            torch.sin(box_centers * 10),
+            torch.cos(box_centers * 10)
+        ], dim=2)  # [batch_size, num_words, 4]
+        
+        # Project position to hidden_dim (simple linear projection)
+        pos_proj = nn.Linear(4, word_encoding.size(2), device=features.device)
+        pos_features = pos_proj(pos_embedding)  # [batch_size, num_words, hidden_dim]
+        
+        # Add position features to word encoding
+        word_encoding = word_encoding + pos_features  # [batch_size, num_words, hidden_dim]
         
         # For each field, predict which text element contains the value
         results = {}
         for field in self.fields:
-            # Expand document features to match words
-            doc_features_expanded = doc_encoding.unsqueeze(1).expand(-1, num_words, -1)
+            # Compute attention scores
+            # Expand document features for broadcasting
+            doc_expanded = doc_encoding.unsqueeze(1)  # [batch_size, 1, hidden_dim]
             
-            # Predict confidence score for each word
-            field_scores = self.field_extractors[field](doc_features_expanded).squeeze(-1)
+            # Compute field-specific attention
+            # Attention scores based on compatibility between doc features and word features
+            compatibility = word_encoding * doc_expanded  # Element-wise mult for compatibility
+            attn_logits = self.field_attentions[field](compatibility)  # [batch_size, num_words, 1]
+            attn_scores = torch.softmax(attn_logits.squeeze(-1), dim=1)  # [batch_size, num_words]
             
-            # Get most likely word for this field
-            confidence, indices = torch.max(field_scores, dim=1)
+            # Get field-specific weighted representation of words
+            weighted_words = torch.bmm(
+                attn_scores.unsqueeze(1),  # [batch_size, 1, num_words]
+                word_encoding  # [batch_size, num_words, hidden_dim]
+            ).squeeze(1)  # [batch_size, hidden_dim]
+            
+            # Concatenate document features with weighted word features
+            field_features = torch.cat([doc_encoding, weighted_words], dim=1)  # [batch_size, hidden_dim*2]
+            
+            # Get field confidence based on combined features
+            field_confidence = self.field_extractors[field](field_features).squeeze(-1)  # [batch_size]
+            
+            # Get the word index with highest attention score
+            _, indices = torch.max(attn_scores, dim=1)  # [batch_size]
             
             # Store predictions
             results[field] = {
                 'indices': indices,               # Indices of most likely words
-                'confidence': confidence          # Confidence scores
+                'confidence': field_confidence,    # Confidence scores
+                'attention': attn_scores          # Attention distribution over words (for visualization)
             }
         
         return results
